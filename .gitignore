@@ -1,0 +1,5 @@
+swim
+*.o
+*.dSYM/
+.DS_Store
+result
