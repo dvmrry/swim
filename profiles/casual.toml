@@ -1,0 +1,6 @@
+# swim profile: casual
+# Visible UI elements, larger text, comfortable browsing
+[appearance]
+tab_bar = "always"
+status_bar = "always"
+font_size = 16

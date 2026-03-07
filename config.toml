@@ -1,0 +1,13 @@
+[general]
+homepage = "https://duckduckgo.com"
+search_engine = "https://duckduckgo.com/?q=%s"
+restore_session = true
+
+[appearance]
+font_size = 12
+tab_bar = "auto"
+status_bar = "always"
+theme = "dark"
+
+[adblock]
+enabled = true

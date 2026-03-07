@@ -1,0 +1,12 @@
+swim
+swim-mcp
+swim.app/
+*.o
+*.dSYM/
+.DS_Store
+result
+*.inc
+test-screenshots/
+test-ui.sh
+Screenshot*.png
+docs/plans/
