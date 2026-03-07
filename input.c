@@ -94,6 +94,11 @@ void mode_init(ModeManager *m, ActionFn on_action, void *ctx) {
     keytrie_bind(&m->normal_keys, "G",  "scroll-bottom");
     keytrie_bind(&m->normal_keys, "gg", "scroll-top");
     keytrie_bind(&m->normal_keys, "yy", "yank-url");
+    keytrie_bind(&m->normal_keys, "f",  "hint-follow");
+    keytrie_bind(&m->normal_keys, "F",  "hint-tab");
+    keytrie_bind(&m->normal_keys, "/",  "find");
+    keytrie_bind(&m->normal_keys, "n",  "find-next");
+    keytrie_bind(&m->normal_keys, "N",  "find-prev");
     keytrie_bind(&m->normal_keys, ":",  "enter-command");
 }
 
@@ -114,6 +119,14 @@ bool mode_handle_key(ModeManager *m, const char *key, unsigned int modifiers) {
             }
             if (key[0] == '\x15') {  // Ctrl-U
                 if (m->on_action) m->on_action("scroll-half-up", m->action_ctx);
+                return true;
+            }
+            if (key[0] == '\x06') {  // Ctrl-F
+                if (m->on_action) m->on_action("scroll-full-down", m->action_ctx);
+                return true;
+            }
+            if (key[0] == '\x02') {  // Ctrl-B
+                if (m->on_action) m->on_action("scroll-full-up", m->action_ctx);
                 return true;
             }
         }
@@ -172,11 +185,21 @@ bool mode_handle_key(ModeManager *m, const char *key, unsigned int modifiers) {
 
     case MODE_HINT:
         if (key[0] == '\x1b') {
+            if (m->on_action) m->on_action("hint-cancel", m->action_ctx);
             mode_set(m, MODE_NORMAL);
             if (m->on_action) m->on_action("mode-normal", m->action_ctx);
             return true;
         }
-        return false;
+        // Accumulate hint characters and send filter action
+        if (key[0] >= 'a' && key[0] <= 'z') {
+            if (m->pending_len < (int)sizeof(m->pending_keys) - 1) {
+                m->pending_keys[m->pending_len++] = key[0];
+                m->pending_keys[m->pending_len] = '\0';
+            }
+            if (m->on_action) m->on_action("hint-filter", m->action_ctx);
+            return true;
+        }
+        return true;  // consume everything in hint mode
     }
     return false;
 }
