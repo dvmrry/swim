@@ -4,6 +4,7 @@
 #include "commands.h"
 #include "ui.h"
 #include "storage.h"
+#include "config.h"
 
 // --- App State ---
 
@@ -14,7 +15,9 @@ typedef struct App {
     SwimUI *ui;
     Storage bookmarks;
     Storage history;
+    Config config;
     char session_path[512];
+    char config_path[512];
 } App;
 
 static App app;
@@ -27,7 +30,16 @@ static void open_url_in_active_tab(const char *raw) {
     // If no dots or slashes, treat as search
     if (!strchr(raw, '.') && !strchr(raw, '/') && strncmp(raw, "http", 4) != 0) {
         char search_url[4096];
-        snprintf(search_url, sizeof(search_url), "https://duckduckgo.com/?q=%s", raw);
+        // Use config search engine, replace %s with query
+        const char *fmt = app.config.search_engine;
+        char *pct = strstr(fmt, "%s");
+        if (pct) {
+            int prefix_len = (int)(pct - fmt);
+            snprintf(search_url, sizeof(search_url), "%.*s%s%s",
+                prefix_len, fmt, raw, pct + 2);
+        } else {
+            snprintf(search_url, sizeof(search_url), "%s%s", fmt, raw);
+        }
         ui_navigate(app.ui, search_url);
     } else {
         ui_navigate(app.ui, raw);
@@ -219,6 +231,23 @@ static void cmd_history(const char *args, void *ctx) {
     }
 }
 
+static void cmd_set(const char *args, void *ctx) {
+    (void)ctx;
+    if (!args || !args[0]) return;
+
+    // Split "key value"
+    char key[64];
+    int i = 0;
+    while (args[i] && args[i] != ' ' && i < 63) {
+        key[i] = args[i];
+        i++;
+    }
+    key[i] = '\0';
+    const char *value = args[i] ? args + i + 1 : "";
+
+    config_set(&app.config, key, value);
+}
+
 static void cmd_adblock(const char *args, void *ctx) {
     (void)ctx;
     if (!args || !args[0] || strcmp(args, "on") == 0) {
@@ -314,8 +343,14 @@ int main(int argc, const char *argv[]) {
         // Ensure config dir exists
         storage_ensure_dir();
 
-        // Init storage
+        // Load config
+        config_init(&app.config);
         const char *home = getenv("HOME");
+        snprintf(app.config_path, sizeof(app.config_path),
+            "%s/.config/swim/config.toml", home ? home : ".");
+        config_load(&app.config, app.config_path);
+
+        // Init storage
         char bm_path[512], hist_path[512];
         snprintf(bm_path, sizeof(bm_path), "%s/.config/swim/bookmarks.json", home ? home : ".");
         snprintf(hist_path, sizeof(hist_path), "%s/.config/swim/history.json", home ? home : ".");
@@ -337,6 +372,7 @@ int main(int argc, const char *argv[]) {
         registry_add(&app.commands, "bookmark", "bm", cmd_bookmark, "Bookmark current page");
         registry_add(&app.commands, "marks", NULL, cmd_marks, "Search bookmarks");
         registry_add(&app.commands, "history", NULL, cmd_history, "Search history");
+        registry_add(&app.commands, "set", NULL, cmd_set, "Set config value");
 
         // Create UI
         UICallbacks callbacks = {
@@ -352,22 +388,28 @@ int main(int argc, const char *argv[]) {
         app.ui = ui_create(callbacks);
 
         // Load adblock rules
-        ui_load_blocklist(app.ui);
+        if (app.config.adblock_enabled) {
+            ui_load_blocklist(app.ui);
+        }
 
         // Restore session or create default tab
         {
-            char session_urls[128][2048];
-            int session_count = session_load(app.session_path, session_urls, 128);
-            if (session_count > 0) {
-                for (int i = 0; i < session_count; i++) {
-                    create_tab(session_urls[i]);
+            int restored = 0;
+            if (app.config.restore_session) {
+                char session_urls[128][2048];
+                int session_count = session_load(app.session_path, session_urls, 128);
+                if (session_count > 0) {
+                    for (int i = 0; i < session_count; i++) {
+                        create_tab(session_urls[i]);
+                    }
+                    browser_set_active(&app.browser, 0);
+                    ui_select_tab(app.ui, 0);
+                    sync_tab_display();
+                    restored = 1;
                 }
-                // Select first tab
-                browser_set_active(&app.browser, 0);
-                ui_select_tab(app.ui, 0);
-                sync_tab_display();
-            } else {
-                create_tab("https://duckduckgo.com");
+            }
+            if (!restored) {
+                create_tab(app.config.homepage);
             }
         }
 
