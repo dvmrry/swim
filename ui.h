@@ -3,6 +3,7 @@
 
 #include "input.h"
 #include "userscript.h"
+#include "theme.h"
 
 // Opaque UI handle — implementation is ObjC
 typedef struct SwimUI SwimUI;
@@ -22,7 +23,7 @@ typedef struct UICallbacks {
 } UICallbacks;
 
 // Create the UI (window, tab bar, webview area, status bar, command bar)
-SwimUI *ui_create(UICallbacks callbacks, bool compact_titlebar);
+SwimUI *ui_create(UICallbacks callbacks, bool compact_titlebar, SwimTheme *theme);
 
 // Tab management — returns tab_id for new tabs
 int  ui_add_tab(SwimUI *ui, const char *url, int tab_id);

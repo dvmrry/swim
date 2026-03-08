@@ -19,19 +19,6 @@ static NSString *const kFocusJS =
     "  window.webkit.messageHandlers.swim.postMessage({type:'focus',focused:false});"
     "});";
 
-// --- Status Bar Colors ---
-
-static NSColor *color_for_mode(Mode mode) {
-    switch (mode) {
-    case MODE_NORMAL:      return [NSColor colorWithSRGBRed:0.45 green:0.70 blue:0.45 alpha:1];
-    case MODE_INSERT:      return [NSColor colorWithSRGBRed:0.45 green:0.55 blue:0.85 alpha:1];
-    case MODE_COMMAND:     return [NSColor colorWithSRGBRed:0.82 green:0.75 blue:0.40 alpha:1];
-    case MODE_HINT:        return [NSColor colorWithSRGBRed:0.90 green:0.55 blue:0.25 alpha:1];
-    case MODE_PASSTHROUGH: return [NSColor colorWithSRGBRed:0.65 green:0.45 blue:0.78 alpha:1];
-    }
-    return [NSColor whiteColor];
-}
-
 static const char *mode_name(Mode mode) {
     switch (mode) {
     case MODE_NORMAL:      return "NORMAL";
@@ -160,7 +147,34 @@ struct SwimUI {
     bool adblock_enabled;
 
     UserScriptManager *userscripts;
+    SwimTheme *theme;
 };
+
+// --- Theme Colors ---
+
+static NSColor *tc(ThemeColor c) {
+    return [NSColor colorWithSRGBRed:c.r green:c.g blue:c.b alpha:1];
+}
+
+static NSColor *color_for_mode(SwimUI *ui, Mode mode) {
+    if (ui->theme) {
+        switch (mode) {
+        case MODE_NORMAL:      return tc(ui->theme->normal);
+        case MODE_INSERT:      return tc(ui->theme->insert);
+        case MODE_COMMAND:     return tc(ui->theme->command);
+        case MODE_HINT:        return tc(ui->theme->hint);
+        case MODE_PASSTHROUGH: return tc(ui->theme->passthrough);
+        }
+    }
+    switch (mode) {
+    case MODE_NORMAL:      return [NSColor colorWithSRGBRed:0.45 green:0.70 blue:0.45 alpha:1];
+    case MODE_INSERT:      return [NSColor colorWithSRGBRed:0.45 green:0.55 blue:0.85 alpha:1];
+    case MODE_COMMAND:     return [NSColor colorWithSRGBRed:0.82 green:0.75 blue:0.40 alpha:1];
+    case MODE_HINT:        return [NSColor colorWithSRGBRed:0.90 green:0.55 blue:0.25 alpha:1];
+    case MODE_PASSTHROUGH: return [NSColor colorWithSRGBRed:0.65 green:0.45 blue:0.78 alpha:1];
+    }
+    return [NSColor whiteColor];
+}
 
 @interface SwimFindBarDelegate : NSObject <NSTextFieldDelegate>
 @property (assign) SwimUI *ui;
@@ -512,16 +526,15 @@ static void rebuild_tab_bar(SwimUI *ui) {
         btn.wantsLayer = YES;
 
         if (i == ui->active_tab) {
-            btn.contentTintColor = [NSColor colorWithSRGBRed:0.90 green:0.90 blue:0.90 alpha:1];
-            btn.layer.backgroundColor = [NSColor colorWithSRGBRed:0.22 green:0.22 blue:0.25 alpha:1].CGColor;
-            // Bottom border via sublayer
+            btn.contentTintColor = ui->theme ? tc(ui->theme->fg) : [NSColor colorWithSRGBRed:0.90 green:0.90 blue:0.90 alpha:1];
+            btn.layer.backgroundColor = [NSColor clearColor].CGColor;
             CALayer *border = [CALayer layer];
-            border.frame = CGRectMake(0, 0, 2000, 2);  // Width stretches, positioned at bottom
-            border.backgroundColor = color_for_mode(MODE_NORMAL).CGColor;
+            border.frame = CGRectMake(0, 0, 2000, 2);
+            border.backgroundColor = color_for_mode(ui, MODE_NORMAL).CGColor;
             border.name = @"tabBorder";
             [btn.layer addSublayer:border];
         } else {
-            btn.contentTintColor = [NSColor colorWithSRGBRed:0.45 green:0.45 blue:0.45 alpha:1];
+            btn.contentTintColor = ui->theme ? tc(ui->theme->fg_dim) : [NSColor colorWithSRGBRed:0.45 green:0.45 blue:0.45 alpha:1];
             btn.layer.backgroundColor = [NSColor clearColor].CGColor;
         }
 
@@ -685,10 +698,11 @@ static void tab_bar_clicked(SwimUI *ui, int index) {
 
 // --- Public API ---
 
-SwimUI *ui_create(UICallbacks callbacks, bool compact_titlebar) {
+SwimUI *ui_create(UICallbacks callbacks, bool compact_titlebar, SwimTheme *theme) {
     SwimUI *ui = calloc(1, sizeof(SwimUI));
     ui->callbacks = callbacks;
     ui->active_tab = -1;
+    ui->theme = theme;
 
     // Window
     NSRect frame = NSMakeRect(200, 200, 1024, 768);
@@ -700,7 +714,7 @@ SwimUI *ui_create(UICallbacks callbacks, bool compact_titlebar) {
                                                backing:NSBackingStoreBuffered
                                                  defer:NO];
     ui->window.title = @"swim";
-    ui->window.backgroundColor = [NSColor colorWithSRGBRed:0.12 green:0.12 blue:0.14 alpha:1];
+    ui->window.backgroundColor = ui->theme ? tc(ui->theme->bg) : [NSColor colorWithSRGBRed:0.12 green:0.12 blue:0.14 alpha:1];
     if (compact_titlebar) {
         ui->window.titlebarAppearsTransparent = YES;
         ui->window.titleVisibility = NSWindowTitleHidden;
@@ -735,7 +749,7 @@ SwimUI *ui_create(UICallbacks callbacks, bool compact_titlebar) {
     ui->tabBarScroll.hasVerticalScroller = NO;
     ui->tabBarScroll.translatesAutoresizingMaskIntoConstraints = NO;
     ui->tabBarScroll.drawsBackground = YES;
-    ui->tabBarScroll.backgroundColor = [NSColor colorWithSRGBRed:0.12 green:0.12 blue:0.14 alpha:1];
+    ui->tabBarScroll.backgroundColor = ui->theme ? tc(ui->theme->bg) : [NSColor colorWithSRGBRed:0.12 green:0.12 blue:0.14 alpha:1];
     [NSLayoutConstraint activateConstraints:@[
         [ui->tabBarScroll.heightAnchor constraintEqualToConstant:28],
     ]];
@@ -747,8 +761,8 @@ SwimUI *ui_create(UICallbacks callbacks, bool compact_titlebar) {
     // Status bar
     ui->modeLabel = make_label(@" NORMAL ");
     ui->modeLabel.font = [NSFont monospacedSystemFontOfSize:11 weight:NSFontWeightBold];
-    ui->modeLabel.textColor = [NSColor colorWithSRGBRed:0.08 green:0.08 blue:0.10 alpha:1];
-    ui->modeLabel.backgroundColor = color_for_mode(MODE_NORMAL);
+    ui->modeLabel.textColor = ui->theme ? tc(ui->theme->bg) : [NSColor colorWithSRGBRed:0.08 green:0.08 blue:0.10 alpha:1];
+    ui->modeLabel.backgroundColor = color_for_mode(ui, MODE_NORMAL);
     ui->modeLabel.drawsBackground = YES;
     ui->modeLabel.wantsLayer = YES;
     ui->modeLabel.layer.cornerRadius = 3;
@@ -757,21 +771,21 @@ SwimUI *ui_create(UICallbacks callbacks, bool compact_titlebar) {
                               forOrientation:NSLayoutConstraintOrientationHorizontal];
 
     ui->urlLabel = make_label(@"");
-    ui->urlLabel.textColor = [NSColor colorWithSRGBRed:0.67 green:0.67 blue:0.67 alpha:1];
+    ui->urlLabel.textColor = ui->theme ? tc(ui->theme->fg) : [NSColor colorWithSRGBRed:0.67 green:0.67 blue:0.67 alpha:1];
     ui->urlLabel.lineBreakMode = NSLineBreakByTruncatingMiddle;
     [ui->urlLabel setContentCompressionResistancePriority:NSLayoutPriorityDefaultLow
                                           forOrientation:NSLayoutConstraintOrientationHorizontal];
 
     ui->progressLabel = make_label(@"");
     ui->progressLabel.font = [NSFont monospacedSystemFontOfSize:11 weight:NSFontWeightRegular];
-    ui->progressLabel.textColor = [NSColor colorWithSRGBRed:0.5 green:0.7 blue:0.9 alpha:1];
+    ui->progressLabel.textColor = ui->theme ? tc(ui->theme->accent) : [NSColor colorWithSRGBRed:0.5 green:0.7 blue:0.9 alpha:1];
     [ui->progressLabel setContentHuggingPriority:NSLayoutPriorityRequired
                                   forOrientation:NSLayoutConstraintOrientationHorizontal];
 
     ui->pendingLabel = make_label(@"");
     ui->pendingLabel.font = [NSFont monospacedSystemFontOfSize:11 weight:NSFontWeightBold];
-    ui->pendingLabel.textColor = [NSColor colorWithSRGBRed:0.08 green:0.08 blue:0.10 alpha:1];
-    ui->pendingLabel.backgroundColor = [NSColor colorWithSRGBRed:0.80 green:0.75 blue:0.45 alpha:1];
+    ui->pendingLabel.textColor = ui->theme ? tc(ui->theme->bg) : [NSColor colorWithSRGBRed:0.08 green:0.08 blue:0.10 alpha:1];
+    ui->pendingLabel.backgroundColor = ui->theme ? tc(ui->theme->command) : [NSColor colorWithSRGBRed:0.80 green:0.75 blue:0.45 alpha:1];
     ui->pendingLabel.drawsBackground = YES;
     ui->pendingLabel.wantsLayer = YES;
     ui->pendingLabel.layer.cornerRadius = 3;
@@ -785,7 +799,7 @@ SwimUI *ui_create(UICallbacks callbacks, bool compact_titlebar) {
     ui->statusBar.edgeInsets = NSEdgeInsetsMake(4, 6, 4, 6);
     ui->statusBar.translatesAutoresizingMaskIntoConstraints = NO;
     ui->statusBar.wantsLayer = YES;
-    ui->statusBar.layer.backgroundColor = [NSColor colorWithSRGBRed:0.13 green:0.13 blue:0.15 alpha:1].CGColor;
+    ui->statusBar.layer.backgroundColor = (ui->theme ? tc(ui->theme->status_bg) : [NSColor colorWithSRGBRed:0.13 green:0.13 blue:0.15 alpha:1]).CGColor;
 
     // Command bar (hidden by default)
     ui->commandBar = [[NSTextField alloc] init];
@@ -802,14 +816,14 @@ SwimUI *ui_create(UICallbacks callbacks, bool compact_titlebar) {
     // Command bar container with ":" prefix
     ui->colonLabel = make_label(@":");
     ui->colonLabel.font = [NSFont monospacedSystemFontOfSize:12 weight:NSFontWeightBold];
-    ui->colonLabel.textColor = [NSColor colorWithSRGBRed:0.82 green:0.75 blue:0.40 alpha:1];
+    ui->colonLabel.textColor = ui->theme ? tc(ui->theme->command) : [NSColor colorWithSRGBRed:0.82 green:0.75 blue:0.40 alpha:1];
     ui->commandBarContainer = [NSStackView stackViewWithViews:@[ui->colonLabel, ui->commandBar]];
     ui->commandBarContainer.orientation = NSUserInterfaceLayoutOrientationHorizontal;
     ui->commandBarContainer.spacing = 2;
     ui->commandBarContainer.edgeInsets = NSEdgeInsetsMake(2, 6, 2, 6);
     ui->commandBarContainer.translatesAutoresizingMaskIntoConstraints = NO;
     ui->commandBarContainer.wantsLayer = YES;
-    ui->commandBarContainer.layer.backgroundColor = [NSColor colorWithSRGBRed:0.10 green:0.10 blue:0.12 alpha:1].CGColor;
+    ui->commandBarContainer.layer.backgroundColor = (ui->theme ? tc(ui->theme->status_bg) : [NSColor colorWithSRGBRed:0.10 green:0.10 blue:0.12 alpha:1]).CGColor;
     ui->commandBarContainer.hidden = YES;
 
     // Find bar (hidden by default)
@@ -825,7 +839,7 @@ SwimUI *ui_create(UICallbacks callbacks, bool compact_titlebar) {
 
     // Find bar container with "/" prefix
     NSTextField *slashLabel = make_label(@"/");
-    slashLabel.textColor = [NSColor colorWithSRGBRed:0.7 green:0.7 blue:0.7 alpha:1];
+    slashLabel.textColor = ui->theme ? tc(ui->theme->fg_dim) : [NSColor colorWithSRGBRed:0.7 green:0.7 blue:0.7 alpha:1];
     ui->findBarContainer = [NSStackView stackViewWithViews:@[slashLabel, ui->findBar]];
     ui->findBarContainer.orientation = NSUserInterfaceLayoutOrientationHorizontal;
     ui->findBarContainer.spacing = 2;
@@ -840,7 +854,7 @@ SwimUI *ui_create(UICallbacks callbacks, bool compact_titlebar) {
     NSView *tabSeparator = [[NSView alloc] init];
     tabSeparator.translatesAutoresizingMaskIntoConstraints = NO;
     tabSeparator.wantsLayer = YES;
-    tabSeparator.layer.backgroundColor = [NSColor colorWithSRGBRed:0.22 green:0.22 blue:0.25 alpha:1].CGColor;
+    tabSeparator.layer.backgroundColor = (ui->theme ? tc(ui->theme->status_bg) : [NSColor colorWithSRGBRed:0.22 green:0.22 blue:0.25 alpha:1]).CGColor;
 
     [ui->rootView addSubview:ui->tabBarScroll];
     [ui->rootView addSubview:tabSeparator];
@@ -1061,7 +1075,7 @@ void ui_go_forward(SwimUI *ui) {
 
 void ui_set_mode(SwimUI *ui, Mode mode) {
     ui->modeLabel.stringValue = [NSString stringWithFormat:@" %s ", mode_name(mode)];
-    ui->modeLabel.backgroundColor = color_for_mode(mode);
+    ui->modeLabel.backgroundColor = color_for_mode(ui, mode);
 }
 
 void ui_set_url(SwimUI *ui, const char *url) {
@@ -1257,7 +1271,7 @@ void ui_set_status_message(SwimUI *ui, const char *msg) {
             if (ui->status_msg_gen == gen) {
                 ui->status_msg_gen = 0;
                 ui->urlLabel.stringValue = [NSString stringWithUTF8String:ui->saved_url];
-                ui->urlLabel.textColor = [NSColor colorWithSRGBRed:0.67 green:0.67 blue:0.67 alpha:1];
+                ui->urlLabel.textColor = ui->theme ? tc(ui->theme->fg) : [NSColor colorWithSRGBRed:0.67 green:0.67 blue:0.67 alpha:1];
             }
         });
 }

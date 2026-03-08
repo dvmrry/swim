@@ -24,6 +24,8 @@ typedef struct App {
     char config_path[512];
     UserScriptManager userscripts;
     char scripts_path[512];
+    SwimTheme theme;
+    char themes_path[512];
 } App;
 
 static App app;
@@ -985,6 +987,21 @@ int main(int argc, const char *argv[]) {
         userscript_init(&app.userscripts);
         userscript_load_dir(&app.userscripts, app.scripts_path);
 
+        // Theme
+        snprintf(app.themes_path, sizeof(app.themes_path),
+            "%s/.config/swim/themes", home ? home : ".");
+        theme_create_defaults(app.themes_path);
+        theme_init_defaults(&app.theme);
+        if (app.config.theme[0] && strcmp(app.config.theme, "default") != 0
+            && strcmp(app.config.theme, "dark") != 0) {
+            char theme_path[1024];
+            snprintf(theme_path, sizeof(theme_path), "%s/%s.theme",
+                app.themes_path, app.config.theme);
+            if (!theme_load(&app.theme, theme_path)) {
+                fprintf(stderr, "swim: theme '%s' not found\n", app.config.theme);
+            }
+        }
+
         // Init pure C state
         browser_init(&app.browser);
         mode_init(&app.mode, handle_action, &app);
@@ -1026,7 +1043,7 @@ int main(int argc, const char *argv[]) {
             .on_command_complete = on_command_complete,
             .ctx = &app,
         };
-        app.ui = ui_create(callbacks, app.config.compact_titlebar);
+        app.ui = ui_create(callbacks, app.config.compact_titlebar, &app.theme);
 
         // Load adblock rules
         if (app.config.adblock_enabled) {
