@@ -46,6 +46,15 @@ static void send_json(int fd, int status, const char *json) {
     send_response(fd, status, "application/json", json, (int)strlen(json));
 }
 
+static void send_dict(int fd, NSDictionary *dict) {
+    NSData *data = [NSJSONSerialization dataWithJSONObject:dict options:0 error:nil];
+    if (data) {
+        send_response(fd, 200, "application/json", [data bytes], (int)[data length]);
+    } else {
+        send_json(fd, 500, "{\"error\":\"serialization failed\"}");
+    }
+}
+
 // --- Request parsing ---
 
 typedef struct {
@@ -167,51 +176,39 @@ static bool translate_key(const char *name, const char **out_key, unsigned int *
     return true;
 }
 
-// --- Route handlers ---
+// --- Internal handlers that return result dictionaries (for batch use) ---
 
-static void handle_health(int fd) {
-    send_json(fd, 200, "{\"ok\":true}");
-}
-
-static void handle_action(int fd, HTTPRequest *req, TestContext *ctx) {
-    NSDictionary *json = parse_json_body(req->body, req->body_len);
+static NSDictionary *do_action(NSDictionary *json, TestContext *ctx) {
     NSString *action = json[@"action"];
-    if (!action) { send_json(fd, 400, "{\"error\":\"missing action\"}"); return; }
+    if (!action) return @{@"ok": @NO, @"error": @"missing action"};
 
     NSNumber *count = json[@"count"];
-
     dispatch_sync(dispatch_get_main_queue(), ^{
         if (count) ctx->mode->count = [count intValue];
         ctx->handle_action([action UTF8String], ctx->action_ctx);
         ctx->mode->count = 0;
     });
-
-    send_json(fd, 200, "{\"ok\":true}");
+    return @{@"ok": @YES};
 }
 
-static void handle_command(int fd, HTTPRequest *req, TestContext *ctx) {
-    NSDictionary *json = parse_json_body(req->body, req->body_len);
+static NSDictionary *do_command(NSDictionary *json, TestContext *ctx) {
     NSString *command = json[@"command"];
-    if (!command) { send_json(fd, 400, "{\"error\":\"missing command\"}"); return; }
+    if (!command) return @{@"ok": @NO, @"error": @"missing command"};
 
     __block bool ok = false;
     dispatch_sync(dispatch_get_main_queue(), ^{
         ok = registry_exec(ctx->commands, [command UTF8String]);
     });
-
-    send_json(fd, 200, ok ? "{\"ok\":true}" : "{\"ok\":false}");
+    return @{@"ok": @(ok)};
 }
 
-static void handle_key(int fd, HTTPRequest *req, TestContext *ctx) {
-    NSDictionary *json = parse_json_body(req->body, req->body_len);
+static NSDictionary *do_key(NSDictionary *json, TestContext *ctx) {
     NSString *key = json[@"key"];
-    if (!key) { send_json(fd, 400, "{\"error\":\"missing key\"}"); return; }
+    if (!key) return @{@"ok": @NO, @"error": @"missing key"};
 
     const char *raw_key;
     unsigned int modifiers;
     translate_key([key UTF8String], &raw_key, &modifiers);
-
-    // Explicit modifiers in JSON override/merge with translated ones
     NSNumber *mods = json[@"modifiers"];
     if (mods) modifiers |= [mods unsignedIntValue];
 
@@ -219,11 +216,10 @@ static void handle_key(int fd, HTTPRequest *req, TestContext *ctx) {
     dispatch_sync(dispatch_get_main_queue(), ^{
         consumed = mode_handle_key(ctx->mode, raw_key, modifiers);
     });
-
-    send_json(fd, 200, consumed ? "{\"consumed\":true}" : "{\"consumed\":false}");
+    return @{@"ok": @YES, @"consumed": @(consumed)};
 }
 
-static void handle_screenshot(int fd, TestContext *ctx) {
+static NSDictionary *do_screenshot(TestContext *ctx) {
     __block NSData *png = nil;
     dispatch_sync(dispatch_get_main_queue(), ^{
         void *data = ui_screenshot(ctx->ui);
@@ -231,14 +227,14 @@ static void handle_screenshot(int fd, TestContext *ctx) {
     });
 
     if (png) {
-        send_response(fd, 200, "image/png", [png bytes], (int)[png length]);
-    } else {
-        send_json(fd, 500, "{\"error\":\"screenshot failed\"}");
+        NSString *b64 = [png base64EncodedStringWithOptions:0];
+        return @{@"ok": @YES, @"content_type": @"image/png", @"base64": b64};
     }
+    return @{@"ok": @NO, @"error": @"screenshot failed"};
 }
 
-static void handle_state(int fd, TestContext *ctx) {
-    __block NSString *json = nil;
+static NSDictionary *do_state(TestContext *ctx) {
+    __block NSDictionary *result = nil;
     dispatch_sync(dispatch_get_main_queue(), ^{
         const char *mode_str = "NORMAL";
         switch (ctx->mode->mode) {
@@ -260,7 +256,8 @@ static void handle_state(int fd, TestContext *ctx) {
             }];
         }
 
-        NSDictionary *state = @{
+        result = @{
+            @"ok": @YES,
             @"mode": [NSString stringWithUTF8String:mode_str],
             @"url": active ? [NSString stringWithUTF8String:active->url] : @"",
             @"title": active ? [NSString stringWithUTF8String:active->title] : @"",
@@ -270,26 +267,14 @@ static void handle_state(int fd, TestContext *ctx) {
             @"pending_keys": [NSString stringWithUTF8String:ctx->mode->pending_keys],
             @"count": @(ctx->mode->count),
         };
-
-        NSData *data = [NSJSONSerialization dataWithJSONObject:state options:0 error:nil];
-        if (data) json = [[NSString alloc] initWithData:data encoding:NSUTF8StringEncoding];
     });
-
-    if (json) {
-        send_json(fd, 200, [json UTF8String]);
-    } else {
-        send_json(fd, 500, "{\"error\":\"state serialization failed\"}");
-    }
+    return result ?: @{@"ok": @NO, @"error": @"state failed"};
 }
 
-static void handle_resize(int fd, HTTPRequest *req, TestContext *ctx) {
-    NSDictionary *json = parse_json_body(req->body, req->body_len);
+static NSDictionary *do_resize(NSDictionary *json, TestContext *ctx) {
     NSNumber *width = json[@"width"];
     NSNumber *height = json[@"height"];
-    if (!width || !height) {
-        send_json(fd, 400, "{\"error\":\"missing width/height\"}");
-        return;
-    }
+    if (!width || !height) return @{@"ok": @NO, @"error": @"missing width/height"};
 
     dispatch_sync(dispatch_get_main_queue(), ^{
         NSWindow *window = (__bridge NSWindow *)ui_get_window(ctx->ui);
@@ -298,105 +283,185 @@ static void handle_resize(int fd, HTTPRequest *req, TestContext *ctx) {
         frame.size.height = [height doubleValue];
         [window setFrame:frame display:YES animate:NO];
     });
-
-    send_json(fd, 200, "{\"ok\":true}");
+    return @{@"ok": @YES};
 }
 
-static void handle_wait(int fd, HTTPRequest *req, TestContext *ctx) {
-    NSDictionary *json = parse_json_body(req->body, req->body_len);
+static NSDictionary *do_wait(NSDictionary *json, TestContext *ctx) {
     NSNumber *timeout_ms = json[@"timeout"];
     double timeout_sec = timeout_ms ? [timeout_ms doubleValue] / 1000.0 : 10.0;
-    if (timeout_sec > 30.0) timeout_sec = 30.0;  // cap at 30s
+    if (timeout_sec > 30.0) timeout_sec = 30.0;
     if (timeout_sec < 0.1) timeout_sec = 0.1;
 
     __block bool loaded = false;
     dispatch_sync(dispatch_get_main_queue(), ^{
         NSDate *deadline = [NSDate dateWithTimeIntervalSinceNow:timeout_sec];
         while ([[NSDate date] compare:deadline] == NSOrderedAscending) {
-            if (!ui_is_loading(ctx->ui)) {
-                loaded = true;
-                break;
-            }
-            // Spin the run loop to let WebKit process events
+            if (!ui_is_loading(ctx->ui)) { loaded = true; break; }
             [[NSRunLoop currentRunLoop] runMode:NSDefaultRunLoopMode
                                      beforeDate:[NSDate dateWithTimeIntervalSinceNow:0.05]];
         }
-        // Final check
         if (!loaded) loaded = !ui_is_loading(ctx->ui);
     });
-
-    send_json(fd, 200, loaded ? "{\"ok\":true,\"loaded\":true}"
-                               : "{\"ok\":true,\"loaded\":false}");
+    return @{@"ok": @YES, @"loaded": @(loaded)};
 }
 
-static void handle_eval(int fd, HTTPRequest *req, TestContext *ctx) {
-    NSDictionary *json = parse_json_body(req->body, req->body_len);
+static NSDictionary *do_eval(NSDictionary *json, TestContext *ctx) {
     NSString *js = json[@"js"];
-    if (!js) { send_json(fd, 400, "{\"error\":\"missing js\"}"); return; }
+    if (!js) return @{@"ok": @NO, @"error": @"missing js"};
 
     bool wrap_json = [json[@"json"] boolValue];
     NSString *eval_js = wrap_json ? [NSString stringWithFormat:@"JSON.stringify(%@)", js] : js;
 
-    __block NSString *result_json = nil;
+    __block NSDictionary *result = nil;
     dispatch_sync(dispatch_get_main_queue(), ^{
         WKWebView *wv = (__bridge WKWebView *)ui_get_active_webview(ctx->ui);
-        if (!wv) {
-            result_json = @"{\"ok\":false,\"error\":\"no active webview\"}";
-            return;
-        }
+        if (!wv) { result = @{@"ok": @NO, @"error": @"no active webview"}; return; }
 
-        __block NSString *response = nil;
+        __block NSDictionary *response = nil;
         __block BOOL done = NO;
 
-        [wv evaluateJavaScript:eval_js completionHandler:^(id result, NSError *error) {
+        [wv evaluateJavaScript:eval_js completionHandler:^(id res, NSError *error) {
             if (error) {
-                NSString *errMsg = [error.localizedDescription
-                    stringByReplacingOccurrencesOfString:@"\"" withString:@"\\\""];
-                response = [NSString stringWithFormat:
-                    @"{\"ok\":false,\"error\":\"%@\"}", errMsg];
-            } else if (result == nil || [result isKindOfClass:[NSNull class]]) {
-                response = @"{\"ok\":true,\"result\":null}";
-            } else if ([result isKindOfClass:[NSString class]]) {
-                // JSON-encode the string value using NSJSONSerialization
-                NSData *d = [NSJSONSerialization dataWithJSONObject:@{@"v": result}
-                    options:0 error:nil];
-                NSString *wrapper = [[NSString alloc] initWithData:d encoding:NSUTF8StringEncoding];
-                // Extract just the value: {"v":"..."} -> "..."
-                NSRange r = [wrapper rangeOfString:@":"];
-                NSString *val = [wrapper substringWithRange:
-                    NSMakeRange(r.location + 1, wrapper.length - r.location - 2)];
-                response = [NSString stringWithFormat:@"{\"ok\":true,\"result\":%@}", val];
-            } else if ([result isKindOfClass:[NSNumber class]]) {
-                if (strcmp([result objCType], @encode(BOOL)) == 0 ||
-                    strcmp([result objCType], @encode(char)) == 0) {
-                    response = [NSString stringWithFormat:@"{\"ok\":true,\"result\":%@}",
-                        [result boolValue] ? @"true" : @"false"];
-                } else {
-                    response = [NSString stringWithFormat:@"{\"ok\":true,\"result\":%@}", result];
-                }
+                response = @{@"ok": @NO, @"error": error.localizedDescription ?: @"unknown"};
+            } else if (res == nil || [res isKindOfClass:[NSNull class]]) {
+                response = nil;  // handled below
             } else {
-                response = [NSString stringWithFormat:
-                    @"{\"ok\":true,\"result\":\"%@\"}", [result description]];
+                // Let NSJSONSerialization handle all types
+                response = @{@"ok": @YES, @"result": res};
             }
             done = YES;
         }];
 
-        // Spin run loop — completion handler fires on main thread
         NSDate *timeout = [NSDate dateWithTimeIntervalSinceNow:10.0];
         while (!done && [[NSRunLoop currentRunLoop] runMode:NSDefaultRunLoopMode
                                                 beforeDate:timeout]) {
             if ([timeout timeIntervalSinceNow] <= 0) break;
         }
 
-        if (!done) response = @"{\"ok\":false,\"error\":\"eval timeout\"}";
-        result_json = response;
+        if (!done) {
+            result = @{@"ok": @NO, @"error": @"eval timeout"};
+        } else if (response) {
+            result = response;
+        } else {
+            result = @{@"ok": @YES, @"result": [NSNull null]};
+        }
     });
+    return result ?: @{@"ok": @NO, @"error": @"eval failed"};
+}
 
-    if (result_json) {
-        send_json(fd, 200, [result_json UTF8String]);
+static NSDictionary *do_sleep_step(NSDictionary *json) {
+    NSNumber *ms = json[@"ms"];
+    double seconds = ms ? [ms doubleValue] / 1000.0 : 0.1;
+    if (seconds > 10.0) seconds = 10.0;
+    if (seconds < 0.01) seconds = 0.01;
+    usleep((useconds_t)(seconds * 1000000));
+    return @{@"ok": @YES};
+}
+
+// --- HTTP route handlers (thin wrappers around do_* functions) ---
+
+static void handle_health(int fd) {
+    send_json(fd, 200, "{\"ok\":true}");
+}
+
+static void handle_action(int fd, HTTPRequest *req, TestContext *ctx) {
+    NSDictionary *json = parse_json_body(req->body, req->body_len);
+    send_dict(fd, do_action(json, ctx));
+}
+
+static void handle_command(int fd, HTTPRequest *req, TestContext *ctx) {
+    NSDictionary *json = parse_json_body(req->body, req->body_len);
+    send_dict(fd, do_command(json, ctx));
+}
+
+static void handle_key(int fd, HTTPRequest *req, TestContext *ctx) {
+    NSDictionary *json = parse_json_body(req->body, req->body_len);
+    send_dict(fd, do_key(json, ctx));
+}
+
+static void handle_screenshot(int fd, TestContext *ctx) {
+    // Direct endpoint still sends raw PNG (not base64)
+    __block NSData *png = nil;
+    dispatch_sync(dispatch_get_main_queue(), ^{
+        void *data = ui_screenshot(ctx->ui);
+        if (data) png = (__bridge_transfer NSData *)data;
+    });
+    if (png) {
+        send_response(fd, 200, "image/png", [png bytes], (int)[png length]);
     } else {
-        send_json(fd, 500, "{\"ok\":false,\"error\":\"eval failed\"}");
+        send_json(fd, 500, "{\"error\":\"screenshot failed\"}");
     }
+}
+
+static void handle_state(int fd, TestContext *ctx) {
+    send_dict(fd, do_state(ctx));
+}
+
+static void handle_resize(int fd, HTTPRequest *req, TestContext *ctx) {
+    NSDictionary *json = parse_json_body(req->body, req->body_len);
+    send_dict(fd, do_resize(json, ctx));
+}
+
+static void handle_wait(int fd, HTTPRequest *req, TestContext *ctx) {
+    NSDictionary *json = parse_json_body(req->body, req->body_len);
+    send_dict(fd, do_wait(json, ctx));
+}
+
+static void handle_eval(int fd, HTTPRequest *req, TestContext *ctx) {
+    NSDictionary *json = parse_json_body(req->body, req->body_len);
+    send_dict(fd, do_eval(json, ctx));
+}
+
+static void handle_batch(int fd, HTTPRequest *req, TestContext *ctx) {
+    if (!req->body || req->body_len <= 0) {
+        send_json(fd, 400, "{\"error\":\"missing body\"}");
+        return;
+    }
+    NSData *data = [NSData dataWithBytes:req->body length:req->body_len];
+    NSArray *steps = [NSJSONSerialization JSONObjectWithData:data options:0 error:nil];
+    if (!steps || ![steps isKindOfClass:[NSArray class]]) {
+        send_json(fd, 400, "{\"error\":\"body must be a JSON array\"}");
+        return;
+    }
+
+    NSMutableArray *results = [NSMutableArray arrayWithCapacity:steps.count];
+
+    for (NSDictionary *step in steps) {
+        NSString *type = step[@"type"];
+        if (!type) {
+            [results addObject:@{@"ok": @NO, @"error": @"missing type"}];
+            continue;
+        }
+
+        NSDictionary *result;
+        if ([type isEqualToString:@"key"]) {
+            result = do_key(step, ctx);
+        } else if ([type isEqualToString:@"action"]) {
+            result = do_action(step, ctx);
+        } else if ([type isEqualToString:@"command"]) {
+            result = do_command(step, ctx);
+        } else if ([type isEqualToString:@"screenshot"]) {
+            result = do_screenshot(ctx);
+        } else if ([type isEqualToString:@"state"]) {
+            result = do_state(ctx);
+        } else if ([type isEqualToString:@"resize"]) {
+            result = do_resize(step, ctx);
+        } else if ([type isEqualToString:@"wait"]) {
+            result = do_wait(step, ctx);
+        } else if ([type isEqualToString:@"eval"]) {
+            result = do_eval(step, ctx);
+        } else if ([type isEqualToString:@"sleep"]) {
+            result = do_sleep_step(step);
+        } else {
+            result = @{@"ok": @NO, @"error":
+                [NSString stringWithFormat:@"unknown type: %@", type]};
+        }
+
+        [results addObject:result ?: @{@"ok": @NO, @"error": @"null result"}];
+    }
+
+    NSDictionary *response = @{@"ok": @YES, @"results": results};
+    send_dict(fd, response);
 }
 
 // --- Server thread ---
@@ -432,6 +497,8 @@ static void *server_thread(void *arg) {
             handle_wait(client_fd, &req, ctx);
         } else if (strcmp(req.method, "POST") == 0 && strcmp(req.path, "/eval") == 0) {
             handle_eval(client_fd, &req, ctx);
+        } else if (strcmp(req.method, "POST") == 0 && strcmp(req.path, "/batch") == 0) {
+            handle_batch(client_fd, &req, ctx);
         } else {
             send_json(client_fd, 404, "{\"error\":\"not found\"}");
         }
