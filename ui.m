@@ -613,8 +613,8 @@ static NSString *const kOldRedditCSS =
     "(document.head||document.documentElement).appendChild(s);"
     "try{if(localStorage.getItem('swim-sidebar-hidden')==='1'){"
     "document.documentElement.classList.add('swim-sidebar-will-hide');"
-    "s.textContent+='.side{width:0!important;opacity:0;padding:0!important;margin:0!important}'"
-    "+'.content{margin-right:20px!important}';"
+    "s.textContent+='.swim-sidebar-will-hide .side{width:0!important;opacity:0;padding:0!important;margin:0!important}'"
+    "+'.swim-sidebar-will-hide .content{margin-right:20px!important}';"
     "}}catch(e){}"
     "})();";
 
@@ -629,6 +629,7 @@ static NSString *const kOldRedditJS =
     "e.stopPropagation();"
     "var s=document.querySelector('.side');"
     "if(!s)return;"
+    "document.documentElement.classList.remove('swim-sidebar-will-hide');"
     "s.classList.add('swim-animate');"
     "s.classList.toggle('swim-hidden');"
     "var h=s.classList.contains('swim-hidden');"
