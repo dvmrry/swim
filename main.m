@@ -1032,9 +1032,9 @@ int main(int argc, const char *argv[]) {
 
 #ifdef SWIM_TEST
         if (test_port > 0) {
-            // Fixed window size for consistent screenshots
+            // Fixed window size for consistent screenshots, offscreen to avoid disruption
             NSWindow *test_window = (__bridge NSWindow *)ui_get_window(app.ui);
-            [test_window setFrame:NSMakeRect(100, 100, 1280, 800) display:YES animate:NO];
+            [test_window setFrame:NSMakeRect(-2000, -2000, 1280, 800) display:YES animate:NO];
 
             static TestContext test_ctx;
             test_ctx = (TestContext){
