@@ -106,6 +106,67 @@ static NSDictionary *parse_json_body(const char *body, int len) {
     return [NSJSONSerialization JSONObjectWithData:data options:0 error:nil];
 }
 
+// --- Named key translation ---
+
+typedef struct {
+    const char *name;
+    const char *raw;
+    unsigned int modifiers;
+} KeyMap;
+
+static const KeyMap key_map[] = {
+    {"Escape",    "\x1b", 0},
+    {"Enter",     "\r",   0},
+    {"Return",    "\r",   0},
+    {"Tab",       "\t",   0},
+    {"Backspace", "\x7f", 0},
+    {"Space",     " ",    0},
+    {"Delete",    "\x7f", 0},
+
+    // Ctrl combos
+    {"Ctrl-A", "\x01", MOD_CTRL},
+    {"Ctrl-B", "\x02", MOD_CTRL},
+    {"Ctrl-C", "\x03", MOD_CTRL},
+    {"Ctrl-D", "\x04", MOD_CTRL},
+    {"Ctrl-E", "\x05", MOD_CTRL},
+    {"Ctrl-F", "\x06", MOD_CTRL},
+    {"Ctrl-G", "\x07", MOD_CTRL},
+    {"Ctrl-H", "\x08", MOD_CTRL},
+    {"Ctrl-I", "\x09", MOD_CTRL},
+    {"Ctrl-J", "\x0a", MOD_CTRL},
+    {"Ctrl-K", "\x0b", MOD_CTRL},
+    {"Ctrl-L", "\x0c", MOD_CTRL},
+    {"Ctrl-M", "\x0d", MOD_CTRL},
+    {"Ctrl-N", "\x0e", MOD_CTRL},
+    {"Ctrl-O", "\x0f", MOD_CTRL},
+    {"Ctrl-P", "\x10", MOD_CTRL},
+    {"Ctrl-Q", "\x11", MOD_CTRL},
+    {"Ctrl-R", "\x12", MOD_CTRL},
+    {"Ctrl-S", "\x13", MOD_CTRL},
+    {"Ctrl-T", "\x14", MOD_CTRL},
+    {"Ctrl-U", "\x15", MOD_CTRL},
+    {"Ctrl-V", "\x16", MOD_CTRL},
+    {"Ctrl-W", "\x17", MOD_CTRL},
+    {"Ctrl-X", "\x18", MOD_CTRL},
+    {"Ctrl-Y", "\x19", MOD_CTRL},
+    {"Ctrl-Z", "\x1a", MOD_CTRL},
+
+    {NULL, NULL, 0}
+};
+
+static bool translate_key(const char *name, const char **out_key, unsigned int *out_mods) {
+    for (int i = 0; key_map[i].name; i++) {
+        if (strcmp(name, key_map[i].name) == 0) {
+            *out_key = key_map[i].raw;
+            *out_mods = key_map[i].modifiers;
+            return true;
+        }
+    }
+    *out_key = name;
+    *out_mods = 0;
+    return true;
+}
+
 // --- Route handlers ---
 
 static void handle_health(int fd) {
@@ -146,12 +207,17 @@ static void handle_key(int fd, HTTPRequest *req, TestContext *ctx) {
     NSString *key = json[@"key"];
     if (!key) { send_json(fd, 400, "{\"error\":\"missing key\"}"); return; }
 
+    const char *raw_key;
+    unsigned int modifiers;
+    translate_key([key UTF8String], &raw_key, &modifiers);
+
+    // Explicit modifiers in JSON override/merge with translated ones
     NSNumber *mods = json[@"modifiers"];
-    unsigned int modifiers = mods ? [mods unsignedIntValue] : 0;
+    if (mods) modifiers |= [mods unsignedIntValue];
 
     __block bool consumed = false;
     dispatch_sync(dispatch_get_main_queue(), ^{
-        consumed = mode_handle_key(ctx->mode, [key UTF8String], modifiers);
+        consumed = mode_handle_key(ctx->mode, raw_key, modifiers);
     });
 
     send_json(fd, 200, consumed ? "{\"consumed\":true}" : "{\"consumed\":false}");
