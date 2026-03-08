@@ -5,6 +5,7 @@
 #include "ui.h"
 #include "storage.h"
 #include "config.h"
+#include "userscript.h"
 #ifdef SWIM_TEST
 #include "test_server.h"
 #endif
@@ -21,6 +22,8 @@ typedef struct App {
     Config config;
     char session_path[512];
     char config_path[512];
+    UserScriptManager userscripts;
+    char scripts_path[512];
 } App;
 
 static App app;
@@ -759,6 +762,35 @@ static void cmd_quit(const char *args, void *ctx) {
     ui_close(app.ui);
 }
 
+static void cmd_scripts(const char *args, void *ctx) {
+    (void)ctx;
+    if (args && strcmp(args, "reload") == 0) {
+        userscript_free(&app.userscripts);
+        int n = userscript_load_dir(&app.userscripts, app.scripts_path);
+        char msg[128];
+        snprintf(msg, sizeof(msg), "Reloaded %d userscript%s", n, n == 1 ? "" : "s");
+        ui_set_status_message(app.ui, msg);
+        return;
+    }
+
+    if (app.userscripts.count == 0) {
+        ui_set_status_message(app.ui, "No userscripts loaded");
+        return;
+    }
+
+    char buf[2048] = {0};
+    int pos = 0;
+    for (int i = 0; i < app.userscripts.count && pos < (int)sizeof(buf) - 100; i++) {
+        UserScript *s = &app.userscripts.scripts[i];
+        if (i > 0) pos += snprintf(buf + pos, sizeof(buf) - pos, " | ");
+        pos += snprintf(buf + pos, sizeof(buf) - pos, "%s", s->name);
+        if (s->match_count > 0) {
+            pos += snprintf(buf + pos, sizeof(buf) - pos, " [%s]", s->match[0]);
+        }
+    }
+    ui_set_status_message(app.ui, buf);
+}
+
 // --- UI Callbacks ---
 
 static void substitute_vars(const char *input, char *output, int output_size) {
@@ -946,6 +978,13 @@ int main(int argc, const char *argv[]) {
         snprintf(app.session_path, sizeof(app.session_path),
             "%s/.config/swim/session.json", home ? home : ".");
 
+        // Userscripts
+        snprintf(app.scripts_path, sizeof(app.scripts_path),
+            "%s/.config/swim/scripts", home ? home : ".");
+        userscript_create_defaults(app.scripts_path);
+        userscript_init(&app.userscripts);
+        userscript_load_dir(&app.userscripts, app.scripts_path);
+
         // Init pure C state
         browser_init(&app.browser);
         mode_init(&app.mode, handle_action, &app);
@@ -972,6 +1011,7 @@ int main(int argc, const char *argv[]) {
         registry_add(&app.commands, "tabs", NULL, cmd_tabs, "List open tabs");
         registry_add(&app.commands, "tabclose", "tc", cmd_tabclose, "Close tab by number");
         registry_add(&app.commands, "tabonly", NULL, cmd_tabonly, "Close all tabs except current");
+        registry_add(&app.commands, "scripts", NULL, cmd_scripts, "List/reload userscripts");
 
         // Create UI
         UICallbacks callbacks = {
@@ -992,6 +1032,9 @@ int main(int argc, const char *argv[]) {
         if (app.config.adblock_enabled) {
             ui_load_blocklist(app.ui);
         }
+
+        // Wire userscripts into UI
+        ui_set_userscripts(app.ui, &app.userscripts);
 
         // Open URLs from command line, restore session, or open homepage
         {
