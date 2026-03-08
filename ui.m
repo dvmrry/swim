@@ -627,10 +627,10 @@ static NSString *const kOldRedditJS =
     "if(hidden){side.classList.add('swim-hidden')}"
     "var btn=document.createElement('div');"
     "btn.textContent=hidden?'\\u00BB':'\\u00AB';"
-    "btn.style.cssText='position:fixed;right:0;top:50%;transform:translateY(-50%);"
-    "z-index:9999;cursor:pointer;font-size:14px;color:#555;background:#222;"
-    "border:1px solid #333;border-right:none;border-radius:3px 0 0 3px;"
-    "padding:8px 3px;user-select:none;opacity:0;transition:opacity 0.3s';"
+    "btn.style.cssText='position:fixed;right:16px;top:50%;transform:translateY(-50%);"
+    "z-index:9999;cursor:pointer;font-size:16px;color:#666;background:#1a1a1a;"
+    "border:1px solid #333;border-radius:4px;"
+    "padding:12px 6px;user-select:none;opacity:0;transition:opacity 0.3s';"
     "setTimeout(function(){btn.style.opacity='1'},100);"
     "btn.title='Toggle sidebar';"
     "btn.addEventListener('click',function(){"
@@ -643,10 +643,50 @@ static NSString *const kOldRedditJS =
     "document.body.appendChild(btn);"
     "})();";
 
+// YouTube ad cleanup — hides ad overlays, skips video ads, removes companion ads
+static NSString *const kYouTubeAdBlockJS =
+    @"(function(){"
+    "if(window.location.hostname!=='www.youtube.com'"
+    "&&window.location.hostname!=='m.youtube.com')return;"
+
+    // CSS to hide ad-related elements
+    "var s=document.createElement('style');"
+    "s.textContent='"
+    ".ad-showing .video-ads,"
+    ".ytp-ad-module,"
+    ".ytp-ad-overlay-container,"
+    ".ytp-ad-text-overlay,"
+    ".ytd-promoted-sparkles-web-renderer,"
+    ".ytd-display-ad-renderer,"
+    ".ytd-companion-slot-renderer,"
+    ".ytd-action-companion-ad-renderer,"
+    ".ytd-in-feed-ad-layout-renderer,"
+    ".ytd-ad-slot-renderer,"
+    ".ytd-banner-promo-renderer,"
+    ".ytd-statement-banner-renderer,"
+    ".ytd-masthead-ad-renderer,"
+    "#player-ads,"
+    "#masthead-ad,"
+    ".ytd-merch-shelf-renderer,"
+    ".ytd-engagement-panel-section-list-renderer[target-id=engagement-panel-ads]"
+    "{display:none!important}';"
+    "document.head.appendChild(s);"
+
+    // Skip video ads: click skip button or fast-forward ad
+    "var observer=new MutationObserver(function(){"
+    "var skip=document.querySelector('.ytp-ad-skip-button,.ytp-ad-skip-button-modern,.ytp-skip-ad-button');"
+    "if(skip){skip.click();return}"
+    "var v=document.querySelector('.ad-showing video');"
+    "if(v&&v.duration&&v.duration>0){v.currentTime=v.duration}"
+    "});"
+    "observer.observe(document.body,{childList:true,subtree:true,attributes:true,attributeFilter:['class']});"
+    "})();";
+
 // --- WebView Factory ---
 
 static WKWebView *create_webview(SwimUI *ui, int tab_id, SwimNavDelegate **out_nav) {
     WKWebViewConfiguration *config = [[WKWebViewConfiguration alloc] init];
+    config.preferences.elementFullscreenEnabled = YES;
     [config.userContentController addScriptMessageHandler:ui->scriptHandler name:@"swim"];
 
     // Focus detection
@@ -676,6 +716,13 @@ static WKWebView *create_webview(SwimUI *ui, int tab_id, SwimNavDelegate **out_n
         injectionTime:WKUserScriptInjectionTimeAtDocumentEnd
         forMainFrameOnly:YES];
     [config.userContentController addUserScript:redditScript];
+
+    // YouTube ad blocking
+    WKUserScript *ytAdBlock = [[WKUserScript alloc]
+        initWithSource:kYouTubeAdBlockJS
+        injectionTime:WKUserScriptInjectionTimeAtDocumentEnd
+        forMainFrameOnly:YES];
+    [config.userContentController addUserScript:ytAdBlock];
 
     // Apply content blocking if enabled
     if (ui->adblock_enabled && ui->blockRuleList) {

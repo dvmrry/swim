@@ -13,5 +13,11 @@
     {"trigger": {"url-filter": ".*\\.outbrain\\.com.*"}, "action": {"type": "block"}},
     {"trigger": {"url-filter": ".*\\.taboola\\.com.*"}, "action": {"type": "block"}},
     {"trigger": {"url-filter": ".*\\.criteo\\.com.*"}, "action": {"type": "block"}},
-    {"trigger": {"url-filter": ".*\\.quantserve\\.com.*"}, "action": {"type": "block"}}
+    {"trigger": {"url-filter": ".*\\.quantserve\\.com.*"}, "action": {"type": "block"}},
+    {"trigger": {"url-filter": ".*\\.adskeeper\\.co\\.uk.*"}, "action": {"type": "block"}},
+    {"trigger": {"url-filter": ".*\\.adnxs\\.com.*"}, "action": {"type": "block"}},
+    {"trigger": {"url-filter": ".*\\.adsrvr\\.org.*"}, "action": {"type": "block"}},
+    {"trigger": {"url-filter": ".*\\.rubiconproject\\.com.*"}, "action": {"type": "block"}},
+    {"trigger": {"url-filter": ".*\\.pubmatic\\.com.*"}, "action": {"type": "block"}},
+    {"trigger": {"url-filter": ".*\\.sharethrough\\.com.*"}, "action": {"type": "block"}}
 ]
