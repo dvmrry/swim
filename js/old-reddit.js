@@ -2,8 +2,10 @@
 (function() {
     if (window.location.hostname !== 'old.reddit.com') return;
 
-    function setup(side) {
-        if (document.getElementById('swim-sidebar-btn')) return;
+    function setup() {
+        if (document.getElementById('swim-sidebar-btn')) return true;
+        var side = document.querySelector('.side');
+        if (!side) return false;
 
         var hidden = localStorage.getItem('swim-sidebar-hidden') === '1';
         if (hidden) { side.classList.add('swim-hidden'); }
@@ -18,22 +20,23 @@
         setTimeout(function() { btn.style.opacity = '1'; }, 100);
         btn.title = 'Toggle sidebar';
         btn.addEventListener('click', function() {
-            side.classList.add('swim-animate');
-            side.classList.toggle('swim-hidden');
-            var h = side.classList.contains('swim-hidden');
+            // Re-query .side fresh each click in case Reddit rebuilt the DOM
+            var s = document.querySelector('.side');
+            if (!s) return;
+            s.classList.add('swim-animate');
+            s.classList.toggle('swim-hidden');
+            var h = s.classList.contains('swim-hidden');
             btn.textContent = h ? '\u00BB' : '\u00AB';
             localStorage.setItem('swim-sidebar-hidden', h ? '1' : '0');
         });
         document.body.appendChild(btn);
+        return true;
     }
 
-    var side = document.querySelector('.side');
-    if (side) { setup(side); return; }
-
-    // Sidebar may load after DocumentEnd on some pages (e.g. /r/popular)
-    var obs = new MutationObserver(function() {
-        var s = document.querySelector('.side');
-        if (s) { obs.disconnect(); setup(s); }
-    });
-    obs.observe(document.body, { childList: true, subtree: true });
+    if (setup()) return;
+    // Retry every 250ms for up to 5s if .side isn't in the DOM yet
+    var n = 0;
+    var iv = setInterval(function() {
+        if (setup() || ++n >= 20) clearInterval(iv);
+    }, 250);
 })();
