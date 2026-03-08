@@ -14,12 +14,14 @@ typedef struct UICallbacks {
     void (*on_title_changed)(const char *title, int tab_id, void *ctx);
     void (*on_load_changed)(bool loading, double progress, int tab_id, void *ctx);
     void (*on_focus_changed)(bool focused, void *ctx);
+    void (*on_hints_done)(void *ctx);
     void (*on_tab_selected)(int index, void *ctx);
+    const char *(*on_command_complete)(const char *prefix, void *ctx);
     void *ctx;
 } UICallbacks;
 
 // Create the UI (window, tab bar, webview area, status bar, command bar)
-SwimUI *ui_create(UICallbacks callbacks);
+SwimUI *ui_create(UICallbacks callbacks, bool compact_titlebar);
 
 // Tab management — returns tab_id for new tabs
 int  ui_add_tab(SwimUI *ui, const char *url, int tab_id);
@@ -39,9 +41,14 @@ void ui_go_forward(SwimUI *ui);
 void ui_set_mode(SwimUI *ui, Mode mode);
 void ui_set_url(SwimUI *ui, const char *url);
 void ui_set_progress(SwimUI *ui, double progress);
+void ui_set_pending_keys(SwimUI *ui, const char *keys);
+void ui_set_status_message(SwimUI *ui, const char *msg);
 
 // Command bar
-void ui_show_command_bar(SwimUI *ui, const char *prefill);
+// prefix: command name prepended on submit and shown in label (e.g. "open ")
+// value: initial text in field (e.g. current URL for O)
+// placeholder: shown when field is empty (e.g. current URL for o)
+void ui_show_command_bar(SwimUI *ui, const char *prefix, const char *value, const char *placeholder);
 void ui_hide_command_bar(SwimUI *ui);
 
 // Hint mode
@@ -59,8 +66,22 @@ void ui_find_prev(SwimUI *ui);
 void ui_load_blocklist(SwimUI *ui);
 void ui_set_adblock(SwimUI *ui, bool enabled);
 
+// Zoom
+void ui_zoom_in(SwimUI *ui);
+void ui_zoom_out(SwimUI *ui);
+void ui_zoom_reset(SwimUI *ui);
+
 // Window
 void ui_set_window_title(SwimUI *ui, const char *title);
 void ui_close(SwimUI *ui);
+
+#ifdef SWIM_TEST
+// Capture active tab's webview content as PNG. Returns NSData* (cast to void*).
+// Must be called from the main thread. Spins the run loop to wait for the
+// async snapshot callback (a semaphore would deadlock since the callback
+// fires on the main thread too).
+void *ui_screenshot(SwimUI *ui);
+void *ui_get_window(SwimUI *ui);  // returns NSWindow* as void*
+#endif
 
 #endif
