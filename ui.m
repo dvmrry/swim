@@ -524,6 +524,7 @@ static void rebuild_tab_bar(SwimUI *ui) {
         btn.tabIndex = i;
         btn.tabId = t->tab_id;
         btn.wantsLayer = YES;
+        btn.layer.masksToBounds = YES;
 
         if (i == ui->active_tab) {
             btn.contentTintColor = ui->theme ? tc(ui->theme->fg) : [NSColor colorWithSRGBRed:0.90 green:0.90 blue:0.90 alpha:1];
