@@ -111,6 +111,7 @@ typedef struct UITab {
     WKWebView *webview;
     SwimNavDelegate *navDelegate;
     int tab_id;
+    char title[256];  // cached title for tab bar display
 } UITab;
 
 // --- SwimUI ---
@@ -487,11 +488,13 @@ static void rebuild_tab_bar(SwimUI *ui) {
         NSString *title;
         if (t->webview.title.length > 0) {
             title = t->webview.title;
-            if (title.length > 20) {
-                title = [[title substringToIndex:18] stringByAppendingString:@".."];
-            }
+        } else if (t->title[0]) {
+            title = [NSString stringWithUTF8String:t->title];
         } else {
             title = @"New Tab";
+        }
+        if (title.length > 20) {
+            title = [[title substringToIndex:18] stringByAppendingString:@".."];
         }
 
         NSString *label = [NSString stringWithFormat:@" %d %@ ", i + 1, title];
@@ -521,6 +524,8 @@ static void rebuild_tab_bar(SwimUI *ui) {
 
         [btn setContentHuggingPriority:NSLayoutPriorityRequired
                         forOrientation:NSLayoutConstraintOrientationHorizontal];
+        btn.translatesAutoresizingMaskIntoConstraints = NO;
+        [btn.heightAnchor constraintEqualToConstant:28].active = YES;
         [ui->tabBar addArrangedSubview:btn];
     }
 }
@@ -771,7 +776,8 @@ SwimUI *ui_create(UICallbacks callbacks, bool compact_titlebar) {
     ui->tabBarScroll.hasHorizontalScroller = NO;
     ui->tabBarScroll.hasVerticalScroller = NO;
     ui->tabBarScroll.translatesAutoresizingMaskIntoConstraints = NO;
-    ui->tabBarScroll.drawsBackground = NO;
+    ui->tabBarScroll.drawsBackground = YES;
+    ui->tabBarScroll.backgroundColor = [NSColor colorWithSRGBRed:0.12 green:0.12 blue:0.14 alpha:1];
     [NSLayoutConstraint activateConstraints:@[
         [ui->tabBarScroll.heightAnchor constraintEqualToConstant:28],
     ]];
@@ -1021,10 +1027,11 @@ int ui_tab_count(SwimUI *ui) {
 }
 
 void ui_update_tab_title(SwimUI *ui, int tab_id, const char *title) {
-    (void)title;
-    // Find the tab and rebuild the bar to show new title
     for (int i = 0; i < ui->tab_count; i++) {
         if (ui->tabs[i].tab_id == tab_id) {
+            if (title && title[0]) {
+                snprintf(ui->tabs[i].title, sizeof(ui->tabs[i].title), "%s", title);
+            }
             rebuild_tab_bar(ui);
             return;
         }
@@ -1380,5 +1387,11 @@ void *ui_screenshot(SwimUI *ui) {
 
 void *ui_get_window(SwimUI *ui) {
     return (__bridge void *)ui->window;
+}
+
+bool ui_is_loading(SwimUI *ui) {
+    if (ui->active_tab < 0 || ui->active_tab >= ui->tab_count) return false;
+    WKWebView *wv = ui->tabs[ui->active_tab].webview;
+    return wv ? [wv isLoading] : false;
 }
 #endif

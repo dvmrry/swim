@@ -302,6 +302,33 @@ static void handle_resize(int fd, HTTPRequest *req, TestContext *ctx) {
     send_json(fd, 200, "{\"ok\":true}");
 }
 
+static void handle_wait(int fd, HTTPRequest *req, TestContext *ctx) {
+    NSDictionary *json = parse_json_body(req->body, req->body_len);
+    NSNumber *timeout_ms = json[@"timeout"];
+    double timeout_sec = timeout_ms ? [timeout_ms doubleValue] / 1000.0 : 10.0;
+    if (timeout_sec > 30.0) timeout_sec = 30.0;  // cap at 30s
+    if (timeout_sec < 0.1) timeout_sec = 0.1;
+
+    __block bool loaded = false;
+    dispatch_sync(dispatch_get_main_queue(), ^{
+        NSDate *deadline = [NSDate dateWithTimeIntervalSinceNow:timeout_sec];
+        while ([[NSDate date] compare:deadline] == NSOrderedAscending) {
+            if (!ui_is_loading(ctx->ui)) {
+                loaded = true;
+                break;
+            }
+            // Spin the run loop to let WebKit process events
+            [[NSRunLoop currentRunLoop] runMode:NSDefaultRunLoopMode
+                                     beforeDate:[NSDate dateWithTimeIntervalSinceNow:0.05]];
+        }
+        // Final check
+        if (!loaded) loaded = !ui_is_loading(ctx->ui);
+    });
+
+    send_json(fd, 200, loaded ? "{\"ok\":true,\"loaded\":true}"
+                               : "{\"ok\":true,\"loaded\":false}");
+}
+
 // --- Server thread ---
 
 static void *server_thread(void *arg) {
@@ -331,6 +358,8 @@ static void *server_thread(void *arg) {
             handle_state(client_fd, ctx);
         } else if (strcmp(req.method, "POST") == 0 && strcmp(req.path, "/resize") == 0) {
             handle_resize(client_fd, &req, ctx);
+        } else if (strcmp(req.method, "POST") == 0 && strcmp(req.path, "/wait") == 0) {
+            handle_wait(client_fd, &req, ctx);
         } else {
             send_json(client_fd, 404, "{\"error\":\"not found\"}");
         }

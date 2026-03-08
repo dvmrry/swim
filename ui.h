@@ -82,6 +82,7 @@ void ui_close(SwimUI *ui);
 // fires on the main thread too).
 void *ui_screenshot(SwimUI *ui);
 void *ui_get_window(SwimUI *ui);  // returns NSWindow* as void*
+bool ui_is_loading(SwimUI *ui);
 #endif
 
 #endif
