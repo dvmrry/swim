@@ -180,6 +180,20 @@ static void handle_action(const char *action, void *ctx) {
         Tab *t = browser_active(&app.browser);
         if (t && t->lazy && t->url[0]) { t->lazy = false; ui_navigate(app.ui, t->url); }
         sync_tab_display();
+    } else if (strcmp(action, "move-tab-left") == 0) {
+        int idx = app.browser.active_tab;
+        int target = idx - 1;
+        if (target < 0) target = app.browser.tab_count - 1;
+        browser_move_tab(&app.browser, idx, target);
+        ui_move_tab(app.ui, idx, target);
+        sync_tab_display();
+    } else if (strcmp(action, "move-tab-right") == 0) {
+        int idx = app.browser.active_tab;
+        int target = idx + 1;
+        if (target >= app.browser.tab_count) target = 0;
+        browser_move_tab(&app.browser, idx, target);
+        ui_move_tab(app.ui, idx, target);
+        sync_tab_display();
     } else if (strcmp(action, "enter-command") == 0) {
         mode_set(&app.mode, MODE_COMMAND);
         ui_set_mode(app.ui, MODE_COMMAND);

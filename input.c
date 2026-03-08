@@ -107,6 +107,8 @@ void mode_init(ModeManager *m, ActionFn on_action, void *ctx) {
     keytrie_bind(&m->normal_keys, ":",  "enter-command");
     keytrie_bind(&m->normal_keys, ".",  "repeat-last");
     keytrie_bind(&m->normal_keys, "gt", "goto-tab");
+    keytrie_bind(&m->normal_keys, "<<", "move-tab-left");
+    keytrie_bind(&m->normal_keys, ">>", "move-tab-right");
 }
 
 void mode_set(ModeManager *m, Mode mode) {

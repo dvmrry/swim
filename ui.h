@@ -29,6 +29,7 @@ void ui_close_tab(SwimUI *ui, int index);
 void ui_select_tab(SwimUI *ui, int index);
 int  ui_tab_count(SwimUI *ui);
 void ui_update_tab_title(SwimUI *ui, int tab_id, const char *title);
+void ui_move_tab(SwimUI *ui, int from, int to);
 
 // WebView control (operates on active tab)
 void ui_navigate(SwimUI *ui, const char *url);

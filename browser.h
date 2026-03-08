@@ -8,6 +8,7 @@ typedef struct Tab {
     char url[2048];
     char title[256];
     bool loading;
+    bool lazy;      // deferred load: navigate on first select
     double progress;
     void *webview;  // opaque, WKWebView* on macOS
 } Tab;
@@ -39,5 +40,8 @@ void browser_tab_set_loading(Browser *b, int tab_id, bool loading, double progre
 
 // Find tab by id, returns index or -1
 int browser_find_tab(Browser *b, int tab_id);
+
+// Move tab from one index to another
+void browser_move_tab(Browser *b, int from, int to);
 
 #endif

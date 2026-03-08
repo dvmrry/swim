@@ -1038,6 +1038,23 @@ void ui_update_tab_title(SwimUI *ui, int tab_id, const char *title) {
     }
 }
 
+void ui_move_tab(SwimUI *ui, int from, int to) {
+    if (from < 0 || from >= ui->tab_count) return;
+    if (to < 0 || to >= ui->tab_count) return;
+    if (from == to) return;
+
+    UITab tmp = ui->tabs[from];
+    if (from < to) {
+        for (int i = from; i < to; i++) ui->tabs[i] = ui->tabs[i + 1];
+    } else {
+        for (int i = from; i > to; i--) ui->tabs[i] = ui->tabs[i - 1];
+    }
+    ui->tabs[to] = tmp;
+
+    ui->active_tab = to;
+    rebuild_tab_bar(ui);
+}
+
 void ui_navigate(SwimUI *ui, const char *url) {
     if (ui->active_tab < 0) return;
     WKWebView *wv = ui->tabs[ui->active_tab].webview;

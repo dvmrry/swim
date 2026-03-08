@@ -75,6 +75,24 @@ int browser_find_tab(Browser *b, int tab_id) {
     return -1;
 }
 
+void browser_move_tab(Browser *b, int from, int to) {
+    if (from < 0 || from >= b->tab_count) return;
+    if (to < 0 || to >= b->tab_count) return;
+    if (from == to) return;
+
+    Tab tmp = b->tabs[from];
+    if (from < to) {
+        for (int i = from; i < to; i++) b->tabs[i] = b->tabs[i + 1];
+    } else {
+        for (int i = from; i > to; i--) b->tabs[i] = b->tabs[i - 1];
+    }
+    b->tabs[to] = tmp;
+
+    if (b->active_tab == from) {
+        b->active_tab = to;
+    }
+}
+
 void browser_tab_set_url(Browser *b, int tab_id, const char *url) {
     int i = browser_find_tab(b, tab_id);
     if (i >= 0) snprintf(b->tabs[i].url, sizeof(b->tabs[i].url), "%s", url);
