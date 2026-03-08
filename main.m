@@ -32,6 +32,11 @@ static App app;
 
 // --- Helpers ---
 
+static void theme_hex(ThemeColor c, char *buf) {
+    snprintf(buf, 8, "#%02x%02x%02x",
+        (int)(c.r * 255), (int)(c.g * 255), (int)(c.b * 255));
+}
+
 static void set_url_with_tls(const char *url) {
     if (url && strncmp(url, "https://", 8) == 0) {
         char display[2200];
@@ -379,7 +384,15 @@ static void cmd_passthrough(const char *args, void *ctx) {
 
 static void cmd_focus(const char *args, void *ctx) {
     (void)args; (void)ctx;
-    static const char *focus_js =
+    char bg[8], sbg[8], fg[8], fgd[8], acc[8];
+    theme_hex(app.theme.bg, bg);
+    theme_hex(app.theme.status_bg, sbg);
+    theme_hex(app.theme.fg, fg);
+    theme_hex(app.theme.fg_dim, fgd);
+    theme_hex(app.theme.accent, acc);
+
+    char focus_js[16384];
+    snprintf(focus_js, sizeof(focus_js),
         "(function(){"
 
         // Toggle off
@@ -417,8 +430,8 @@ static void cmd_focus(const char *args, void *ctx) {
         // Build overlay
         "var o=document.createElement('div');"
         "o.id='swim-focus';"
-        "o.style.cssText='position:fixed;top:0;left:0;width:100%;height:100%;"
-        "z-index:99999;background:#111;overflow-y:auto;';"
+        "o.style.cssText='position:fixed;top:0;left:0;width:100%%;height:100%%;"
+        "z-index:99999;background:%s;overflow-y:auto;';"
 
         // Inner content column
         "var inner=document.createElement('div');"
@@ -428,17 +441,15 @@ static void cmd_focus(const char *args, void *ctx) {
         "var h=document.createElement('h1');"
         "h.textContent=titleText;"
         "h.style.cssText='font:bold 26px/1.3 system-ui,-apple-system,sans-serif;"
-        "color:#e0e0e0;margin:0 0 8px;border:none;letter-spacing:-0.3px;';"
+        "color:%s;margin:0 0 8px;border:none;letter-spacing:-0.3px;';"
         "inner.appendChild(h);"
 
         // Reddit post body (self-text, images, galleries, video)
         "if(isReddit&&!isRedditListing){"
-        // Fetch post JSON for gallery/media data, then build content
         "  (function loadRedditMedia(){"
         "    var jsonUrl=location.pathname.replace(/\\/$/,'')+ '.json';"
         "    fetch(jsonUrl).then(function(r){return r.json()}).then(function(data){"
         "      var post=data[0].data.children[0].data;"
-        // Gallery: media_metadata has all images
         "      if(post.media_metadata){"
         "        var ids=post.gallery_data?post.gallery_data.items.map(function(i){return i.media_id})"
         "          :Object.keys(post.media_metadata);"
@@ -448,37 +459,33 @@ static void cmd_focus(const char *args, void *ctx) {
         "          src=src.replace(/&amp;/g,'&');"
         "          if(!src)return;"
         "          var img=document.createElement('img');img.src=src;img.loading='lazy';"
-        "          img.style.cssText='max-width:100%;height:auto;border-radius:4px;margin:0 0 16px;';"
+        "          img.style.cssText='max-width:100%%;height:auto;border-radius:4px;margin:0 0 16px;';"
         "          inner.insertBefore(img,inner.querySelector('#swim-focus-sep'));"
         "        });"
         "      }"
-        // Single image post
         "      else if(post.url&&/\\.(jpg|jpeg|png|gif|webp)(\\?.*)?$/i.test(post.url)){"
         "        var img=document.createElement('img');img.src=post.url;"
-        "        img.style.cssText='max-width:100%;height:auto;border-radius:4px;margin:0 0 16px;';"
+        "        img.style.cssText='max-width:100%%;height:auto;border-radius:4px;margin:0 0 16px;';"
         "        inner.insertBefore(img,inner.querySelector('#swim-focus-sep'));"
         "      }"
-        // Preview image (for link posts with thumbnails)
         "      else if(post.preview&&post.preview.images&&post.preview.images[0]){"
         "        var src=post.preview.images[0].source.url.replace(/&amp;/g,'&');"
         "        var img=document.createElement('img');img.src=src;"
-        "        img.style.cssText='max-width:100%;height:auto;border-radius:4px;margin:0 0 16px;';"
+        "        img.style.cssText='max-width:100%%;height:auto;border-radius:4px;margin:0 0 16px;';"
         "        inner.insertBefore(img,inner.querySelector('#swim-focus-sep'));"
         "      }"
-        // Video (v.redd.it)
         "      if(post.secure_media&&post.secure_media.reddit_video){"
         "        var v=document.createElement('video');v.controls=true;"
         "        v.src=post.secure_media.reddit_video.fallback_url;"
-        "        v.style.cssText='max-width:100%;border-radius:4px;margin:0 0 16px;';"
+        "        v.style.cssText='max-width:100%%;border-radius:4px;margin:0 0 16px;';"
         "        inner.insertBefore(v,inner.querySelector('#swim-focus-sep'));"
         "      }"
         "    }).catch(function(){});"
         "  })();"
-        // Self-text body (available immediately, no fetch needed)
         "  var selfText=document.querySelector('.expando .usertext-body');"
         "  if(selfText&&selfText.textContent.trim()){"
         "    var pb=selfText.cloneNode(true);"
-        "    pb.style.cssText='font:15px/1.7 Georgia,serif;color:#d0ccc4;margin:0 0 8px;';"
+        "    pb.style.cssText='font:15px/1.7 Georgia,serif;color:%s;margin:0 0 8px;';"
         "    inner.appendChild(pb);"
         "  }"
         "}"
@@ -486,12 +493,11 @@ static void cmd_focus(const char *args, void *ctx) {
         // Separator
         "var hr=document.createElement('div');"
         "hr.id='swim-focus-sep';"
-        "hr.style.cssText='width:60px;height:1px;background:#333;margin:16px 0 32px;';"
+        "hr.style.cssText='width:60px;height:1px;background:%s;margin:16px 0 32px;';"
         "inner.appendChild(hr);"
 
         // Extract content — reddit-specific
         "if(isReddit&&isRedditListing){"
-        // Listing page: render each post as a clean card
         "  var things=article.querySelectorAll('.thing.link');"
         "  things.forEach(function(t){"
         "    var titleEl=t.querySelector('.title a.title');"
@@ -504,35 +510,31 @@ static void cmd_focus(const char *args, void *ctx) {
         "    var thumb=t.querySelector('.thumbnail img');"
 
         "    var row=document.createElement('div');"
-        "    row.style.cssText='padding:16px 0;border-bottom:1px solid #1a1a1a;';"
+        "    row.style.cssText='padding:16px 0;border-bottom:1px solid %s;';"
 
-        // Post title as link
         "    var h=document.createElement('a');"
         "    h.href=titleEl.href;"
         "    h.textContent=titleEl.textContent;"
-        "    h.style.cssText='font:bold 16px/1.4 system-ui,sans-serif;color:#6eb5ff;"
+        "    h.style.cssText='font:bold 16px/1.4 system-ui,sans-serif;color:%s;"
         "    text-decoration:none;display:block;margin:0 0 6px;';"
         "    row.appendChild(h);"
 
-        // Thumbnail if available
         "    if(thumb&&thumb.src&&!thumb.src.includes('self')&&!thumb.src.includes('nsfw')){"
         "      var img=document.createElement('img');img.src=thumb.src;img.loading='lazy';"
-        "      img.style.cssText='max-width:100%;max-height:300px;border-radius:4px;margin:0 0 8px;display:block;';"
+        "      img.style.cssText='max-width:100%%;max-height:300px;border-radius:4px;margin:0 0 8px;display:block;';"
         "      row.appendChild(img);"
         "    }"
 
-        // Self-text preview
         "    if(selfText&&selfText.textContent.trim()){"
         "      var preview=document.createElement('div');"
         "      preview.innerHTML=selfText.innerHTML;"
-        "      preview.style.cssText='font:14px/1.6 Georgia,serif;color:#999;margin:0 0 8px;"
+        "      preview.style.cssText='font:14px/1.6 Georgia,serif;color:%s;margin:0 0 8px;"
         "      max-height:120px;overflow:hidden;';"
         "      row.appendChild(preview);"
         "    }"
 
-        // Meta line: score, author, comments, domain
         "    var meta=document.createElement('div');"
-        "    meta.style.cssText='font:12px/1 system-ui,sans-serif;color:#555;';"
+        "    meta.style.cssText='font:12px/1 system-ui,sans-serif;color:%s;';"
         "    var parts=[];"
         "    if(score)parts.push(score.textContent);"
         "    if(author)parts.push(author.textContent);"
@@ -544,7 +546,6 @@ static void cmd_focus(const char *args, void *ctx) {
         "    inner.appendChild(row);"
         "  });"
         "}else if(isReddit){"
-        // Comments page: build clean comment tree
         "  var comments=article.querySelectorAll('.comment');"
         "  comments.forEach(function(c){"
         "    var entry=c.querySelector('.entry');"
@@ -559,25 +560,24 @@ static void cmd_focus(const char *args, void *ctx) {
 
         "    var row=document.createElement('div');"
         "    row.style.cssText='margin:0 0 4px;padding:12px 0 12px '+(depth*24)+'px;"
-        "    border-bottom:1px solid #1a1a1a;';"
+        "    border-bottom:1px solid %s;';"
 
         "    var meta=document.createElement('div');"
-        "    meta.style.cssText='font:12px/1 system-ui,sans-serif;color:#555;margin:0 0 6px;';"
+        "    meta.style.cssText='font:12px/1 system-ui,sans-serif;color:%s;margin:0 0 6px;';"
         "    meta.textContent=(author?author.textContent:'[deleted]')"
         "      +(score?' \\u00B7 '+score.textContent:'');"
         "    row.appendChild(meta);"
 
         "    var text=document.createElement('div');"
         "    text.innerHTML=body.innerHTML;"
-        "    text.style.cssText='font:15px/1.7 Georgia,serif;color:#d0ccc4;';"
-        // Embed images from links in comments
+        "    text.style.cssText='font:15px/1.7 Georgia,serif;color:%s;';"
         "    text.querySelectorAll('a').forEach(function(a){"
         "      var u=a.href||'';"
         "      if(/\\.(jpg|jpeg|png|gif|webp)(\\?.*)?$/i.test(u)"
         "        ||/i\\.redd\\.it|preview\\.redd\\.it|i\\.imgur\\.com/i.test(u)){"
         "        var img=document.createElement('img');"
         "        img.src=u;img.loading='lazy';"
-        "        img.style.cssText='max-width:100%;height:auto;border-radius:4px;margin:8px 0;display:block;';"
+        "        img.style.cssText='max-width:100%%;height:auto;border-radius:4px;margin:8px 0;display:block;';"
         "        a.parentNode.insertBefore(img,a.nextSibling);"
         "      }"
         "    });"
@@ -587,7 +587,6 @@ static void cmd_focus(const char *args, void *ctx) {
         "  });"
         "}else{"
 
-        // Generic: clone and strip
         "  var clone=article.cloneNode(true);"
         "  clone.querySelectorAll('nav,header,footer,.sidebar,.ad,.social-share,"
         ".related-posts,.newsletter,aside,[role=complementary],"
@@ -600,25 +599,25 @@ static void cmd_focus(const char *args, void *ctx) {
         "s.textContent='"
         "#swim-focus *{box-sizing:border-box}"
         "#swim-focus p{margin:0 0 1.2em;line-height:1.7}"
-        "#swim-focus img{max-width:100%;height:auto;border-radius:4px;margin:1em auto;display:block}"
-        "#swim-focus a{color:#6eb5ff;text-decoration:none}"
+        "#swim-focus img{max-width:100%%;height:auto;border-radius:4px;margin:1em auto;display:block}"
+        "#swim-focus a{color:%s;text-decoration:none}"
         "#swim-focus a:hover{text-decoration:underline}"
-        "#swim-focus pre{background:#1a1a1a;padding:16px;border-radius:6px;"
-        "overflow-x:auto;font:14px/1.5 ui-monospace,monospace;color:#aaa}"
-        "#swim-focus code{font:14px ui-monospace,monospace;color:#aaa;"
-        "background:#1a1a1a;padding:2px 5px;border-radius:3px}"
+        "#swim-focus pre{background:%s;padding:16px;border-radius:6px;"
+        "overflow-x:auto;font:14px/1.5 ui-monospace,monospace;color:%s}"
+        "#swim-focus code{font:14px ui-monospace,monospace;color:%s;"
+        "background:%s;padding:2px 5px;border-radius:3px}"
         "#swim-focus pre code{padding:0;background:none}"
         "#swim-focus h1,#swim-focus h2,#swim-focus h3,#swim-focus h4{"
-        "font-family:system-ui,sans-serif;color:#e0e0e0;margin:1.5em 0 0.5em;line-height:1.3}"
+        "font-family:system-ui,sans-serif;color:%s;margin:1.5em 0 0.5em;line-height:1.3}"
         "#swim-focus h2{font-size:22px}#swim-focus h3{font-size:18px}"
-        "#swim-focus blockquote{border-left:3px solid #333;margin:1em 0;padding:0 0 0 20px;color:#888}"
+        "#swim-focus blockquote{border-left:3px solid %s;margin:1em 0;padding:0 0 0 20px;color:%s}"
         "#swim-focus ul,#swim-focus ol{padding-left:24px}"
-        "#swim-focus li{margin:0.3em 0;color:#d0ccc4}"
-        "#swim-focus table{border-collapse:collapse;width:100%;margin:1em 0}"
-        "#swim-focus td,#swim-focus th{border:1px solid #222;padding:8px;text-align:left;color:#aaa}"
-        "#swim-focus th{background:#1a1a1a;color:#ccc}"
-        "#swim-focus hr{border:none;border-top:1px solid #222;margin:2em 0}"
-        "#swim-focus .md{font:15px/1.7 Georgia,serif;color:#d0ccc4}"
+        "#swim-focus li{margin:0.3em 0;color:%s}"
+        "#swim-focus table{border-collapse:collapse;width:100%%;margin:1em 0}"
+        "#swim-focus td,#swim-focus th{border:1px solid %s;padding:8px;text-align:left;color:%s}"
+        "#swim-focus th{background:%s;color:%s}"
+        "#swim-focus hr{border:none;border-top:1px solid %s;margin:2em 0}"
+        "#swim-focus .md{font:15px/1.7 Georgia,serif;color:%s}"
         "';"
         "o.appendChild(s);"
 
@@ -627,7 +626,34 @@ static void cmd_focus(const char *args, void *ctx) {
         "document.body.style.overflow='hidden';"
         "o.scrollTop=0;"
         "o.focus();"
-        "})()";
+        "})()",
+        /* overlay bg */ bg,
+        /* title color */ fg,
+        /* self-text color */ fg,
+        /* separator */ fgd,
+        /* listing row border */ sbg,
+        /* listing link color */ acc,
+        /* listing preview text */ fgd,
+        /* listing meta */ fgd,
+        /* comment row border */ sbg,
+        /* comment meta */ fgd,
+        /* comment text */ fg,
+        /* style: a color */ acc,
+        /* style: pre bg */ sbg,
+        /* style: pre/code text */ fgd,
+        /* style: code text */ fgd,
+        /* style: code bg */ sbg,
+        /* style: headings */ fg,
+        /* style: blockquote border */ fgd,
+        /* style: blockquote text */ fgd,
+        /* style: li color */ fg,
+        /* style: td/th border */ sbg,
+        /* style: td/th text */ fgd,
+        /* style: th bg */ sbg,
+        /* style: th text */ fg,
+        /* style: hr border */ sbg,
+        /* style: .md text */ fg
+    );
     ui_run_js(app.ui, focus_js);
 }
 
