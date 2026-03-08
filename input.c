@@ -1,4 +1,5 @@
 #include "input.h"
+#include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 
@@ -94,39 +95,62 @@ void mode_init(ModeManager *m, ActionFn on_action, void *ctx) {
     keytrie_bind(&m->normal_keys, "G",  "scroll-bottom");
     keytrie_bind(&m->normal_keys, "gg", "scroll-top");
     keytrie_bind(&m->normal_keys, "yy", "yank-url");
+    keytrie_bind(&m->normal_keys, "yp", "yank-pretty-url");
+    keytrie_bind(&m->normal_keys, "pp", "paste-open");
+    keytrie_bind(&m->normal_keys, "Pp", "paste-tabopen");
+    keytrie_bind(&m->normal_keys, "T",  "command-tabopen-current");
     keytrie_bind(&m->normal_keys, "f",  "hint-follow");
     keytrie_bind(&m->normal_keys, "F",  "hint-tab");
     keytrie_bind(&m->normal_keys, "/",  "find");
     keytrie_bind(&m->normal_keys, "n",  "find-next");
     keytrie_bind(&m->normal_keys, "N",  "find-prev");
     keytrie_bind(&m->normal_keys, ":",  "enter-command");
+    keytrie_bind(&m->normal_keys, ".",  "repeat-last");
+    keytrie_bind(&m->normal_keys, "gt", "goto-tab");
 }
 
 void mode_set(ModeManager *m, Mode mode) {
     m->mode = mode;
     m->pending_len = 0;
+    m->count = 0;
     memset(m->pending_keys, 0, sizeof(m->pending_keys));
 }
 
 bool mode_handle_key(ModeManager *m, const char *key, unsigned int modifiers) {
     switch (m->mode) {
     case MODE_NORMAL: {
-        // Ctrl-D / Ctrl-U for half page scroll
+        // Escape in normal mode (dismiss focus overlay, cancel pending)
+        if (key[0] == '\x1b') {
+            m->pending_len = 0;
+            m->count = 0;
+            memset(m->pending_keys, 0, sizeof(m->pending_keys));
+            if (m->on_action) m->on_action("mode-normal", m->action_ctx);
+            return true;
+        }
+
+        // Ctrl shortcuts
         if (modifiers & MOD_CTRL) {
-            if (key[0] == '\x04') {  // Ctrl-D
-                if (m->on_action) m->on_action("scroll-half-down", m->action_ctx);
+            const char *ctrl_action = NULL;
+            if (key[0] == '\x04') ctrl_action = "scroll-half-down";   // Ctrl-D
+            else if (key[0] == '\x15') ctrl_action = "scroll-half-up"; // Ctrl-U
+            else if (key[0] == '\x06') ctrl_action = "scroll-full-down"; // Ctrl-F
+            else if (key[0] == '\x02') ctrl_action = "scroll-full-up";   // Ctrl-B
+            else if (key[0] == '\x16') ctrl_action = "enter-passthrough"; // Ctrl-V
+
+            if (ctrl_action) {
+                snprintf(m->last_action, sizeof(m->last_action), "%s", ctrl_action);
+                if (m->on_action) m->on_action(ctrl_action, m->action_ctx);
+                m->count = 0;
                 return true;
             }
-            if (key[0] == '\x15') {  // Ctrl-U
-                if (m->on_action) m->on_action("scroll-half-up", m->action_ctx);
-                return true;
-            }
-            if (key[0] == '\x06') {  // Ctrl-F
-                if (m->on_action) m->on_action("scroll-full-down", m->action_ctx);
-                return true;
-            }
-            if (key[0] == '\x02') {  // Ctrl-B
-                if (m->on_action) m->on_action("scroll-full-up", m->action_ctx);
+        }
+
+        // Count prefix: digits when no pending trie input
+        if (m->pending_len == 0) {
+            if ((m->count == 0 && key[0] >= '1' && key[0] <= '9') ||
+                (m->count > 0 && key[0] >= '0' && key[0] <= '9')) {
+                m->count = m->count * 10 + (key[0] - '0');
+                if (m->count > 999) m->count = 999;
                 return true;
             }
         }
@@ -141,6 +165,7 @@ bool mode_handle_key(ModeManager *m, const char *key, unsigned int modifiers) {
         if (result == NULL) {
             // No match, reset
             m->pending_len = 0;
+            m->count = 0;
             memset(m->pending_keys, 0, sizeof(m->pending_keys));
             return false;
         }
@@ -148,10 +173,32 @@ bool mode_handle_key(ModeManager *m, const char *key, unsigned int modifiers) {
             // Prefix match, wait for more keys
             return true;
         }
-        // Complete match
+
+        // Complete match — resolve repeat and fire
         m->pending_len = 0;
         memset(m->pending_keys, 0, sizeof(m->pending_keys));
-        if (m->on_action) m->on_action(result, m->action_ctx);
+
+        const char *final_action = result;
+        if (strcmp(result, "repeat-last") == 0) {
+            if (m->last_action[0]) {
+                final_action = m->last_action;
+            } else {
+                m->count = 0;
+                return true;
+            }
+        } else {
+            // Only record repeatable actions (skip mode changes, destructive, meta)
+            if (strcmp(result, "close-tab") != 0 &&
+                strcmp(result, "mode-normal") != 0 &&
+                strncmp(result, "command-", 8) != 0 &&
+                strncmp(result, "enter-", 6) != 0 &&
+                strncmp(result, "hint-", 5) != 0) {
+                snprintf(m->last_action, sizeof(m->last_action), "%s", result);
+            }
+        }
+
+        if (m->on_action) m->on_action(final_action, m->action_ctx);
+        m->count = 0;
         return true;
     }
 

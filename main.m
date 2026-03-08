@@ -164,6 +164,22 @@ static void handle_action(const char *action, void *ctx) {
         Tab *t = browser_active(&app.browser);
         if (t && t->lazy && t->url[0]) { t->lazy = false; ui_navigate(app.ui, t->url); }
         sync_tab_display();
+    } else if (strcmp(action, "goto-tab") == 0) {
+        int target;
+        if (app.mode.count > 0) {
+            target = app.mode.count - 1;  // 1-indexed to 0-indexed
+            if (target >= app.browser.tab_count) target = app.browser.tab_count - 1;
+            if (target < 0) target = 0;
+        } else {
+            // No count = next tab (same as K)
+            target = app.browser.active_tab + 1;
+            if (target >= app.browser.tab_count) target = 0;
+        }
+        browser_set_active(&app.browser, target);
+        ui_select_tab(app.ui, target);
+        Tab *t = browser_active(&app.browser);
+        if (t && t->lazy && t->url[0]) { t->lazy = false; ui_navigate(app.ui, t->url); }
+        sync_tab_display();
     } else if (strcmp(action, "enter-command") == 0) {
         mode_set(&app.mode, MODE_COMMAND);
         ui_set_mode(app.ui, MODE_COMMAND);
@@ -353,9 +369,10 @@ static void cmd_focus(const char *args, void *ctx) {
 
         // Find main content — site-specific then generic
         "var article,isReddit=location.hostname==='old.reddit.com';"
+        "var isRedditListing=false;"
         "if(isReddit){"
-        "  article=document.querySelector('.sitetable.nestedlisting')"
-        "    ||document.querySelector('#siteTable');"
+        "  article=document.querySelector('.sitetable.nestedlisting');"
+        "  if(!article){article=document.querySelector('#siteTable');isRedditListing=!!article;}"
         "}else{"
         "  article=document.querySelector('article')"
         "  ||document.querySelector('[role=main]')"
@@ -373,7 +390,7 @@ static void cmd_focus(const char *args, void *ctx) {
         "var titleText=document.title||'';"
         "titleText=titleText.replace(/\\s*[-|\\u2013\\u2014]\\s*(Wikipedia|Reddit|reddit\\.com).*$/i,'');"
         "titleText=titleText.replace(/\\s*:\\s*(reddit\\.com)$/i,'');"
-        "if(isReddit){"
+        "if(isReddit&&!isRedditListing){"
         "  var pt=document.querySelector('.top-matter .title a');"
         "  if(pt)titleText=pt.textContent;"
         "}"
@@ -396,7 +413,7 @@ static void cmd_focus(const char *args, void *ctx) {
         "inner.appendChild(h);"
 
         // Reddit post body (self-text, images, galleries, video)
-        "if(isReddit){"
+        "if(isReddit&&!isRedditListing){"
         // Fetch post JSON for gallery/media data, then build content
         "  (function loadRedditMedia(){"
         "    var jsonUrl=location.pathname.replace(/\\/$/,'')+ '.json';"
@@ -453,8 +470,62 @@ static void cmd_focus(const char *args, void *ctx) {
         "hr.style.cssText='width:60px;height:1px;background:#333;margin:16px 0 32px;';"
         "inner.appendChild(hr);"
 
-        // Extract content — reddit-specific: build clean comment tree
-        "if(isReddit){"
+        // Extract content — reddit-specific
+        "if(isReddit&&isRedditListing){"
+        // Listing page: render each post as a clean card
+        "  var things=article.querySelectorAll('.thing.link');"
+        "  things.forEach(function(t){"
+        "    var titleEl=t.querySelector('.title a.title');"
+        "    if(!titleEl)return;"
+        "    var author=t.querySelector('.author');"
+        "    var score=t.querySelector('.score.unvoted');"
+        "    var comments=t.querySelector('.comments');"
+        "    var domain=t.querySelector('.domain a');"
+        "    var selfText=t.querySelector('.expando .usertext-body');"
+        "    var thumb=t.querySelector('.thumbnail img');"
+
+        "    var row=document.createElement('div');"
+        "    row.style.cssText='padding:16px 0;border-bottom:1px solid #1a1a1a;';"
+
+        // Post title as link
+        "    var h=document.createElement('a');"
+        "    h.href=titleEl.href;"
+        "    h.textContent=titleEl.textContent;"
+        "    h.style.cssText='font:bold 16px/1.4 system-ui,sans-serif;color:#6eb5ff;"
+        "    text-decoration:none;display:block;margin:0 0 6px;';"
+        "    row.appendChild(h);"
+
+        // Thumbnail if available
+        "    if(thumb&&thumb.src&&!thumb.src.includes('self')&&!thumb.src.includes('nsfw')){"
+        "      var img=document.createElement('img');img.src=thumb.src;img.loading='lazy';"
+        "      img.style.cssText='max-width:100%;max-height:300px;border-radius:4px;margin:0 0 8px;display:block;';"
+        "      row.appendChild(img);"
+        "    }"
+
+        // Self-text preview
+        "    if(selfText&&selfText.textContent.trim()){"
+        "      var preview=document.createElement('div');"
+        "      preview.innerHTML=selfText.innerHTML;"
+        "      preview.style.cssText='font:14px/1.6 Georgia,serif;color:#999;margin:0 0 8px;"
+        "      max-height:120px;overflow:hidden;';"
+        "      row.appendChild(preview);"
+        "    }"
+
+        // Meta line: score, author, comments, domain
+        "    var meta=document.createElement('div');"
+        "    meta.style.cssText='font:12px/1 system-ui,sans-serif;color:#555;';"
+        "    var parts=[];"
+        "    if(score)parts.push(score.textContent);"
+        "    if(author)parts.push(author.textContent);"
+        "    if(comments)parts.push(comments.textContent);"
+        "    if(domain)parts.push(domain.textContent);"
+        "    meta.textContent=parts.join(' \\u00B7 ');"
+        "    row.appendChild(meta);"
+
+        "    inner.appendChild(row);"
+        "  });"
+        "}else if(isReddit){"
+        // Comments page: build clean comment tree
         "  var comments=article.querySelectorAll('.comment');"
         "  comments.forEach(function(c){"
         "    var entry=c.querySelector('.entry');"
