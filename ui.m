@@ -1394,4 +1394,9 @@ bool ui_is_loading(SwimUI *ui) {
     WKWebView *wv = ui->tabs[ui->active_tab].webview;
     return wv ? [wv isLoading] : false;
 }
+
+void *ui_get_active_webview(SwimUI *ui) {
+    if (ui->active_tab < 0 || ui->active_tab >= ui->tab_count) return NULL;
+    return (__bridge void *)ui->tabs[ui->active_tab].webview;
+}
 #endif

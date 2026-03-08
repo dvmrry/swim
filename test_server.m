@@ -329,6 +329,76 @@ static void handle_wait(int fd, HTTPRequest *req, TestContext *ctx) {
                                : "{\"ok\":true,\"loaded\":false}");
 }
 
+static void handle_eval(int fd, HTTPRequest *req, TestContext *ctx) {
+    NSDictionary *json = parse_json_body(req->body, req->body_len);
+    NSString *js = json[@"js"];
+    if (!js) { send_json(fd, 400, "{\"error\":\"missing js\"}"); return; }
+
+    bool wrap_json = [json[@"json"] boolValue];
+    NSString *eval_js = wrap_json ? [NSString stringWithFormat:@"JSON.stringify(%@)", js] : js;
+
+    __block NSString *result_json = nil;
+    dispatch_sync(dispatch_get_main_queue(), ^{
+        WKWebView *wv = (__bridge WKWebView *)ui_get_active_webview(ctx->ui);
+        if (!wv) {
+            result_json = @"{\"ok\":false,\"error\":\"no active webview\"}";
+            return;
+        }
+
+        __block NSString *response = nil;
+        __block BOOL done = NO;
+
+        [wv evaluateJavaScript:eval_js completionHandler:^(id result, NSError *error) {
+            if (error) {
+                NSString *errMsg = [error.localizedDescription
+                    stringByReplacingOccurrencesOfString:@"\"" withString:@"\\\""];
+                response = [NSString stringWithFormat:
+                    @"{\"ok\":false,\"error\":\"%@\"}", errMsg];
+            } else if (result == nil || [result isKindOfClass:[NSNull class]]) {
+                response = @"{\"ok\":true,\"result\":null}";
+            } else if ([result isKindOfClass:[NSString class]]) {
+                // JSON-encode the string value using NSJSONSerialization
+                NSData *d = [NSJSONSerialization dataWithJSONObject:@{@"v": result}
+                    options:0 error:nil];
+                NSString *wrapper = [[NSString alloc] initWithData:d encoding:NSUTF8StringEncoding];
+                // Extract just the value: {"v":"..."} -> "..."
+                NSRange r = [wrapper rangeOfString:@":"];
+                NSString *val = [wrapper substringWithRange:
+                    NSMakeRange(r.location + 1, wrapper.length - r.location - 2)];
+                response = [NSString stringWithFormat:@"{\"ok\":true,\"result\":%@}", val];
+            } else if ([result isKindOfClass:[NSNumber class]]) {
+                if (strcmp([result objCType], @encode(BOOL)) == 0 ||
+                    strcmp([result objCType], @encode(char)) == 0) {
+                    response = [NSString stringWithFormat:@"{\"ok\":true,\"result\":%@}",
+                        [result boolValue] ? @"true" : @"false"];
+                } else {
+                    response = [NSString stringWithFormat:@"{\"ok\":true,\"result\":%@}", result];
+                }
+            } else {
+                response = [NSString stringWithFormat:
+                    @"{\"ok\":true,\"result\":\"%@\"}", [result description]];
+            }
+            done = YES;
+        }];
+
+        // Spin run loop — completion handler fires on main thread
+        NSDate *timeout = [NSDate dateWithTimeIntervalSinceNow:10.0];
+        while (!done && [[NSRunLoop currentRunLoop] runMode:NSDefaultRunLoopMode
+                                                beforeDate:timeout]) {
+            if ([timeout timeIntervalSinceNow] <= 0) break;
+        }
+
+        if (!done) response = @"{\"ok\":false,\"error\":\"eval timeout\"}";
+        result_json = response;
+    });
+
+    if (result_json) {
+        send_json(fd, 200, [result_json UTF8String]);
+    } else {
+        send_json(fd, 500, "{\"ok\":false,\"error\":\"eval failed\"}");
+    }
+}
+
 // --- Server thread ---
 
 static void *server_thread(void *arg) {
@@ -360,6 +430,8 @@ static void *server_thread(void *arg) {
             handle_resize(client_fd, &req, ctx);
         } else if (strcmp(req.method, "POST") == 0 && strcmp(req.path, "/wait") == 0) {
             handle_wait(client_fd, &req, ctx);
+        } else if (strcmp(req.method, "POST") == 0 && strcmp(req.path, "/eval") == 0) {
+            handle_eval(client_fd, &req, ctx);
         } else {
             send_json(client_fd, 404, "{\"error\":\"not found\"}");
         }

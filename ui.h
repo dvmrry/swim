@@ -83,6 +83,7 @@ void ui_close(SwimUI *ui);
 void *ui_screenshot(SwimUI *ui);
 void *ui_get_window(SwimUI *ui);  // returns NSWindow* as void*
 bool ui_is_loading(SwimUI *ui);
+void *ui_get_active_webview(SwimUI *ui);  // returns WKWebView* as void*
 #endif
 
 #endif
