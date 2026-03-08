@@ -158,6 +158,8 @@ struct SwimUI {
 
     WKContentRuleList *blockRuleList;
     bool adblock_enabled;
+
+    UserScriptManager *userscripts;
 };
 
 @interface SwimFindBarDelegate : NSObject <NSTextFieldDelegate>
@@ -594,113 +596,6 @@ static NSString *const kHintsJS =
     "  window.webkit.messageHandlers.swim.postMessage({type:'hints-cancelled'})}};"
     "})();";
 
-// Early CSS injection — runs before page renders to prevent flash
-static NSString *const kOldRedditCSS =
-    @"(function(){"
-    "if(window.location.hostname!=='old.reddit.com')return;"
-    "var s=document.createElement('style');"
-    "s.textContent='"
-    ".sponsorlink,.promoted,.promotedlink{display:none!important}"
-    "#siteTable_organic{display:none!important}"
-    ".infobar.listingsignupbar{display:none!important}"
-    ".premium-banner-outer,.goldvertisement,.ad-container{display:none!important}"
-    ".spacer .premium-banner,.spacer .gold-accent{display:none!important}"
-    ".side{overflow:hidden}"
-    ".side.swim-hidden{width:0!important;opacity:0;padding:0!important;margin:0!important}"
-    ".side.swim-animate,.side.swim-animate~.content,.side.swim-animate+.content{transition:all 0.2s}"
-    ".side.swim-hidden~.content,.side.swim-hidden+.content{margin-right:20px!important}"
-    "';"
-    "(document.head||document.documentElement).appendChild(s);"
-    "try{if(localStorage.getItem('swim-sidebar-hidden')==='1'){"
-    "document.documentElement.classList.add('swim-sidebar-will-hide');"
-    "s.textContent+='.swim-sidebar-will-hide .side{width:0!important;opacity:0;padding:0!important;margin:0!important}'"
-    "+'.swim-sidebar-will-hide .content{margin-right:20px!important}';"
-    "}}catch(e){}"
-    "})();";
-
-// Late JS — runs after DOM is ready to add toggle button
-static NSString *const kOldRedditJS =
-    @"(function(){"
-    "if(window.location.hostname!=='old.reddit.com')return;"
-
-    // Event delegation — survives BFCache since listener is on document
-    "document.addEventListener('click',function(e){"
-    "if(e.target.id!=='swim-sidebar-btn')return;"
-    "e.stopPropagation();"
-    "var s=document.querySelector('.side');"
-    "if(!s)return;"
-    "document.documentElement.classList.remove('swim-sidebar-will-hide');"
-    "s.classList.add('swim-animate');"
-    "s.classList.toggle('swim-hidden');"
-    "var h=s.classList.contains('swim-hidden');"
-    "e.target.textContent=h?'\\u00BB':'\\u00AB';"
-    "localStorage.setItem('swim-sidebar-hidden',h?'1':'0');"
-    "});"
-
-    "function setup(){"
-    "if(document.getElementById('swim-sidebar-btn'))return true;"
-    "var side=document.querySelector('.side');"
-    "if(!side)return false;"
-    "var hidden=localStorage.getItem('swim-sidebar-hidden')==='1';"
-    "if(hidden){side.classList.add('swim-hidden')}"
-    "var btn=document.createElement('div');"
-    "btn.id='swim-sidebar-btn';"
-    "btn.textContent=hidden?'\\u00BB':'\\u00AB';"
-    "btn.style.cssText='position:fixed;right:16px;top:50%;transform:translateY(-50%);"
-    "z-index:9999;cursor:pointer;font-size:16px;color:#666;background:#1a1a1a;"
-    "border:1px solid #333;border-radius:4px;"
-    "padding:12px 6px;user-select:none;opacity:0;transition:opacity 0.3s';"
-    "setTimeout(function(){btn.style.opacity='1'},100);"
-    "btn.title='Toggle sidebar';"
-    "document.body.appendChild(btn);"
-    "return true;"
-    "}"
-
-    // Run setup now, retry if .side isn't in DOM yet
-    "if(!setup()){"
-    "var n=0;"
-    "var iv=setInterval(function(){if(setup()||++n>=20)clearInterval(iv)},250);"
-    "}"
-    "})();";
-
-// YouTube ad cleanup — hides ad overlays, skips video ads, removes companion ads
-static NSString *const kYouTubeAdBlockJS =
-    @"(function(){"
-    "if(window.location.hostname!=='www.youtube.com'"
-    "&&window.location.hostname!=='m.youtube.com')return;"
-
-    // CSS to hide ad-related elements
-    "var s=document.createElement('style');"
-    "s.textContent='"
-    ".ad-showing .video-ads,"
-    ".ytp-ad-module,"
-    ".ytp-ad-overlay-container,"
-    ".ytp-ad-text-overlay,"
-    ".ytd-promoted-sparkles-web-renderer,"
-    ".ytd-display-ad-renderer,"
-    ".ytd-companion-slot-renderer,"
-    ".ytd-action-companion-ad-renderer,"
-    ".ytd-in-feed-ad-layout-renderer,"
-    ".ytd-ad-slot-renderer,"
-    ".ytd-banner-promo-renderer,"
-    ".ytd-statement-banner-renderer,"
-    ".ytd-masthead-ad-renderer,"
-    "#player-ads,"
-    "#masthead-ad,"
-    ".ytd-merch-shelf-renderer,"
-    ".ytd-engagement-panel-section-list-renderer[target-id=engagement-panel-ads]"
-    "{display:none!important}';"
-    "document.head.appendChild(s);"
-
-    // Skip video ads: click skip button or fast-forward ad
-    "var observer=new MutationObserver(function(){"
-    "var skip=document.querySelector('.ytp-ad-skip-button,.ytp-ad-skip-button-modern,.ytp-skip-ad-button');"
-    "if(skip){skip.click();return}"
-    "var v=document.querySelector('.ad-showing video');"
-    "if(v&&v.duration&&v.duration>0){v.currentTime=v.duration}"
-    "});"
-    "observer.observe(document.body,{childList:true,subtree:true,attributes:true,attributeFilter:['class']});"
-    "})();";
 
 // --- WebView Factory ---
 
@@ -723,26 +618,22 @@ static WKWebView *create_webview(SwimUI *ui, int tab_id, SwimNavDelegate **out_n
         forMainFrameOnly:YES];
     [config.userContentController addUserScript:hintsScript];
 
-    // old.reddit.com — early CSS (before render)
-    WKUserScript *redditCSS = [[WKUserScript alloc]
-        initWithSource:kOldRedditCSS
-        injectionTime:WKUserScriptInjectionTimeAtDocumentStart
-        forMainFrameOnly:YES];
-    [config.userContentController addUserScript:redditCSS];
-
-    // old.reddit.com — toggle button (after DOM ready)
-    WKUserScript *redditScript = [[WKUserScript alloc]
-        initWithSource:kOldRedditJS
-        injectionTime:WKUserScriptInjectionTimeAtDocumentEnd
-        forMainFrameOnly:YES];
-    [config.userContentController addUserScript:redditScript];
-
-    // YouTube ad blocking
-    WKUserScript *ytAdBlock = [[WKUserScript alloc]
-        initWithSource:kYouTubeAdBlockJS
-        injectionTime:WKUserScriptInjectionTimeAtDocumentEnd
-        forMainFrameOnly:YES];
-    [config.userContentController addUserScript:ytAdBlock];
+    // Userscripts — inject all loaded scripts (they self-filter via hostname checks)
+    if (ui->userscripts) {
+        for (int i = 0; i < ui->userscripts->count; i++) {
+            UserScript *us = &ui->userscripts->scripts[i];
+            NSString *src = [NSString stringWithUTF8String:us->source];
+            if (!src) continue;
+            WKUserScriptInjectionTime timing = (us->run_at == SCRIPT_RUN_AT_DOCUMENT_START)
+                ? WKUserScriptInjectionTimeAtDocumentStart
+                : WKUserScriptInjectionTimeAtDocumentEnd;
+            WKUserScript *userScript = [[WKUserScript alloc]
+                initWithSource:src
+                injectionTime:timing
+                forMainFrameOnly:YES];
+            [config.userContentController addUserScript:userScript];
+        }
+    }
 
     // Apply content blocking if enabled
     if (ui->adblock_enabled && ui->blockRuleList) {
@@ -1395,6 +1286,10 @@ void ui_set_window_title(SwimUI *ui, const char *title) {
     } else {
         ui->window.title = @"swim";
     }
+}
+
+void ui_set_userscripts(SwimUI *ui, UserScriptManager *scripts) {
+    ui->userscripts = scripts;
 }
 
 void ui_close(SwimUI *ui) {

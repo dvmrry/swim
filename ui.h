@@ -2,6 +2,7 @@
 #define SWIM_UI_H
 
 #include "input.h"
+#include "userscript.h"
 
 // Opaque UI handle — implementation is ObjC
 typedef struct SwimUI SwimUI;
@@ -75,6 +76,9 @@ void ui_zoom_reset(SwimUI *ui);
 // Window
 void ui_set_window_title(SwimUI *ui, const char *title);
 void ui_close(SwimUI *ui);
+
+// Userscripts — call before creating any tabs
+void ui_set_userscripts(SwimUI *ui, UserScriptManager *scripts);
 
 #ifdef SWIM_TEST
 // Capture active tab's webview content as PNG. Returns NSData* (cast to void*).
