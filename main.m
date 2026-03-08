@@ -693,6 +693,67 @@ static void cmd_session(const char *args, void *ctx) {
     }
 }
 
+static void cmd_tabs(const char *args, void *ctx) {
+    (void)args; (void)ctx;
+    if (app.browser.tab_count == 0) return;
+
+    char buf[2048] = {0};
+    int pos = 0;
+    for (int i = 0; i < app.browser.tab_count && pos < (int)sizeof(buf) - 100; i++) {
+        Tab *t = &app.browser.tabs[i];
+        const char *title = t->title[0] ? t->title : t->url;
+        char short_title[30];
+        snprintf(short_title, sizeof(short_title), "%s", title);
+
+        if (i > 0) pos += snprintf(buf + pos, sizeof(buf) - pos, " | ");
+        if (i == app.browser.active_tab) {
+            pos += snprintf(buf + pos, sizeof(buf) - pos, "%d: *%s", i + 1, short_title);
+        } else {
+            pos += snprintf(buf + pos, sizeof(buf) - pos, "%d: %s", i + 1, short_title);
+        }
+    }
+    ui_set_status_message(app.ui, buf);
+}
+
+static void cmd_tabclose(const char *args, void *ctx) {
+    (void)ctx;
+    int target;
+    if (args && args[0]) {
+        target = atoi(args) - 1;
+    } else {
+        target = app.browser.active_tab;
+    }
+
+    if (target < 0 || target >= app.browser.tab_count) {
+        ui_set_status_message(app.ui, "Invalid tab number");
+        return;
+    }
+
+    if (app.browser.tab_count <= 1) {
+        ui_close(app.ui);
+        return;
+    }
+
+    browser_close_tab(&app.browser, target);
+    ui_close_tab(app.ui, target);
+    browser_set_active(&app.browser, app.browser.active_tab);
+    sync_tab_display();
+}
+
+static void cmd_tabonly(const char *args, void *ctx) {
+    (void)args; (void)ctx;
+    int keep = app.browser.active_tab;
+
+    for (int i = app.browser.tab_count - 1; i >= 0; i--) {
+        if (i == keep) continue;
+        browser_close_tab(&app.browser, i);
+        ui_close_tab(app.ui, i);
+        if (i < keep) keep--;
+    }
+    browser_set_active(&app.browser, 0);
+    sync_tab_display();
+}
+
 static void cmd_quit(const char *args, void *ctx) {
     (void)args; (void)ctx;
     ui_close(app.ui);
@@ -908,6 +969,9 @@ int main(int argc, const char *argv[]) {
         registry_add(&app.commands, "passthrough", NULL, cmd_passthrough, "Enter passthrough mode");
         registry_add(&app.commands, "focus", NULL, cmd_focus, "Reader mode");
         registry_add(&app.commands, "session", NULL, cmd_session, "Save/load named sessions");
+        registry_add(&app.commands, "tabs", NULL, cmd_tabs, "List open tabs");
+        registry_add(&app.commands, "tabclose", "tc", cmd_tabclose, "Close tab by number");
+        registry_add(&app.commands, "tabonly", NULL, cmd_tabonly, "Close all tabs except current");
 
         // Create UI
         UICallbacks callbacks = {
