@@ -621,11 +621,12 @@ static NSString *const kOldRedditCSS =
 static NSString *const kOldRedditJS =
     @"(function(){"
     "if(window.location.hostname!=='old.reddit.com')return;"
-    "var side=document.querySelector('.side');"
-    "if(!side)return;"
+    "function setup(side){"
+    "if(document.getElementById('swim-sidebar-btn'))return;"
     "var hidden=localStorage.getItem('swim-sidebar-hidden')==='1';"
     "if(hidden){side.classList.add('swim-hidden')}"
     "var btn=document.createElement('div');"
+    "btn.id='swim-sidebar-btn';"
     "btn.textContent=hidden?'\\u00BB':'\\u00AB';"
     "btn.style.cssText='position:fixed;right:16px;top:50%;transform:translateY(-50%);"
     "z-index:9999;cursor:pointer;font-size:16px;color:#666;background:#1a1a1a;"
@@ -641,6 +642,52 @@ static NSString *const kOldRedditJS =
     "localStorage.setItem('swim-sidebar-hidden',h?'1':'0');"
     "});"
     "document.body.appendChild(btn);"
+    "}"
+    "var side=document.querySelector('.side');"
+    "if(side){setup(side);return}"
+    "var obs=new MutationObserver(function(){"
+    "var s=document.querySelector('.side');"
+    "if(s){obs.disconnect();setup(s)}"
+    "});"
+    "obs.observe(document.body,{childList:true,subtree:true});"
+    "})();";
+
+// Inline fullscreen — fills webview instead of going native macOS fullscreen
+static NSString *const kInlineFullscreenJS =
+    @"(function(){"
+    "var orig=Element.prototype.requestFullscreen;"
+    "var exitOrig=document.exitFullscreen;"
+    "var current=null;"
+    "var style=document.createElement('style');"
+    "style.textContent='.swim-fullscreen{position:fixed!important;top:0!important;left:0!important;"
+    "width:100vw!important;height:100vh!important;z-index:2147483647!important;"
+    "background:#000!important;margin:0!important;padding:0!important;"
+    "border:none!important;border-radius:0!important}';"
+    "document.head.appendChild(style);"
+    "Element.prototype.requestFullscreen=function(){"
+    "if(current)current.classList.remove('swim-fullscreen');"
+    "this.classList.add('swim-fullscreen');"
+    "current=this;"
+    "Object.defineProperty(document,'fullscreenElement',{get:function(){return current},configurable:true});"
+    "this.dispatchEvent(new Event('fullscreenchange',{bubbles:true}));"
+    "document.dispatchEvent(new Event('fullscreenchange'));"
+    "return Promise.resolve();"
+    "};"
+    "document.exitFullscreen=function(){"
+    "if(current){current.classList.remove('swim-fullscreen');current=null}"
+    "Object.defineProperty(document,'fullscreenElement',{get:function(){return null},configurable:true});"
+    "document.dispatchEvent(new Event('fullscreenchange'));"
+    "return Promise.resolve();"
+    "};"
+    // Also handle webkit prefix used by some sites
+    "Element.prototype.webkitRequestFullscreen=Element.prototype.requestFullscreen;"
+    "Element.prototype.webkitRequestFullScreen=Element.prototype.requestFullscreen;"
+    "document.webkitExitFullscreen=document.exitFullscreen;"
+    "Object.defineProperty(document,'webkitFullscreenElement',"
+    "{get:function(){return document.fullscreenElement},configurable:true});"
+    "document.addEventListener('keydown',function(e){"
+    "if(e.key==='Escape'&&current){document.exitFullscreen()}"
+    "});"
     "})();";
 
 // YouTube ad cleanup — hides ad overlays, skips video ads, removes companion ads
@@ -686,8 +733,15 @@ static NSString *const kYouTubeAdBlockJS =
 
 static WKWebView *create_webview(SwimUI *ui, int tab_id, SwimNavDelegate **out_nav) {
     WKWebViewConfiguration *config = [[WKWebViewConfiguration alloc] init];
-    config.preferences.elementFullscreenEnabled = YES;
+    config.preferences.elementFullscreenEnabled = NO;
     [config.userContentController addScriptMessageHandler:ui->scriptHandler name:@"swim"];
+
+    // Inline fullscreen override (before any page JS runs)
+    WKUserScript *fsScript = [[WKUserScript alloc]
+        initWithSource:kInlineFullscreenJS
+        injectionTime:WKUserScriptInjectionTimeAtDocumentStart
+        forMainFrameOnly:YES];
+    [config.userContentController addUserScript:fsScript];
 
     // Focus detection
     WKUserScript *focusScript = [[WKUserScript alloc]
