@@ -1309,34 +1309,72 @@ void ui_close(SwimUI *ui) {
 
 #ifdef SWIM_TEST
 void *ui_screenshot(SwimUI *ui) {
-    if (ui->active_tab < 0 || ui->active_tab >= ui->tab_count) return NULL;
-    WKWebView *wv = ui->tabs[ui->active_tab].webview;
-    if (!wv) return NULL;
+    // Capture the full window content (tab bar, status bar, webview, command bar).
+    // We composite: render the NSView hierarchy for chrome, then overlay the
+    // WKWebView snapshot (since WKWebView doesn't render via displayRectIgnoringOpacity).
+    NSView *contentView = ui->window.contentView;
+    NSRect bounds = contentView.bounds;
+    if (bounds.size.width <= 0 || bounds.size.height <= 0) return NULL;
 
-    __block NSData *result = nil;
+    // Step 1: Capture the WKWebView content
+    __block NSImage *webviewImage = nil;
     __block BOOL done = NO;
 
-    WKSnapshotConfiguration *config = [[WKSnapshotConfiguration alloc] init];
-    [wv takeSnapshotWithConfiguration:config
-                    completionHandler:^(NSImage *image, NSError *error) {
-        (void)error;
-        if (image) {
-            NSBitmapImageRep *rep = [[NSBitmapImageRep alloc]
-                initWithData:[image TIFFRepresentation]];
-            result = [rep representationUsingType:NSBitmapImageFileTypePNG
-                                       properties:@{}];
-        }
-        done = YES;
-    }];
+    if (ui->active_tab >= 0 && ui->active_tab < ui->tab_count) {
+        WKWebView *wv = ui->tabs[ui->active_tab].webview;
+        if (wv) {
+            WKSnapshotConfiguration *config = [[WKSnapshotConfiguration alloc] init];
+            [wv takeSnapshotWithConfiguration:config
+                            completionHandler:^(NSImage *image, NSError *error) {
+                (void)error;
+                webviewImage = image;
+                done = YES;
+            }];
 
-    // Spin run loop — we're on the main thread, and the completion handler
-    // also delivers on the main thread, so a semaphore would deadlock.
-    NSDate *timeout = [NSDate dateWithTimeIntervalSinceNow:10.0];
-    while (!done && [[NSRunLoop currentRunLoop] runMode:NSDefaultRunLoopMode
-                                            beforeDate:timeout]) {
-        if ([timeout timeIntervalSinceNow] <= 0) break;
+            NSDate *timeout = [NSDate dateWithTimeIntervalSinceNow:10.0];
+            while (!done && [[NSRunLoop currentRunLoop] runMode:NSDefaultRunLoopMode
+                                                    beforeDate:timeout]) {
+                if ([timeout timeIntervalSinceNow] <= 0) break;
+            }
+        }
     }
 
+    // Step 2: Render full view hierarchy into a bitmap
+    NSBitmapImageRep *rep = [contentView bitmapImageRepForCachingDisplayInRect:bounds];
+    if (!rep) return NULL;
+    [contentView cacheDisplayInRect:bounds toBitmapImageRep:rep];
+
+    // Step 3: Composite the webview snapshot over the webview area
+    // (cacheDisplayInRect renders NSViews but WKWebView renders blank)
+    if (webviewImage) {
+        NSRect wvFrame = [ui->webviewContainer convertRect:ui->webviewContainer.bounds
+                                                    toView:contentView];
+        // Flip Y for bitmap drawing (NSView is flipped in bitmap context)
+        NSImage *composite = [[NSImage alloc] initWithSize:bounds.size];
+        [composite lockFocus];
+
+        // Draw the view hierarchy render
+        [rep drawInRect:bounds];
+
+        // Draw the webview snapshot in the webview container's frame
+        [webviewImage drawInRect:wvFrame
+                        fromRect:NSZeroRect
+                       operation:NSCompositingOperationSourceOver
+                        fraction:1.0];
+
+        [composite unlockFocus];
+
+        // Convert composite to PNG
+        NSData *tiff = [composite TIFFRepresentation];
+        NSBitmapImageRep *finalRep = [[NSBitmapImageRep alloc] initWithData:tiff];
+        NSData *result = [finalRep representationUsingType:NSBitmapImageFileTypePNG
+                                               properties:@{}];
+        return (__bridge_retained void *)result;
+    }
+
+    // No webview — just return the view hierarchy render
+    NSData *result = [rep representationUsingType:NSBitmapImageFileTypePNG
+                                       properties:@{}];
     return (__bridge_retained void *)result;
 }
 
