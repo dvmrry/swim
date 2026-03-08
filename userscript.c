@@ -112,6 +112,22 @@ static const char *kDefaultYouTubeAdblock =
     "observer.observe(document.body,{childList:true,subtree:true,attributes:true,attributeFilter:['class']});\n"
     "})();\n";
 
+static const char *kDefaultDarkMode =
+    "// ==UserScript==\n"
+    "// @name        Dark Mode\n"
+    "// @match       *://*/*\n"
+    "// @run-at      document-start\n"
+    "// ==/UserScript==\n"
+    "\n"
+    "(function(){\n"
+    "var s=document.createElement('style');\n"
+    "s.textContent='\\\n"
+    "html{filter:invert(1) hue-rotate(180deg)!important}\\\n"
+    "img,video,canvas,svg,picture,[style*=\"background-image\"]{filter:invert(1) hue-rotate(180deg)!important}\\\n"
+    "';\n"
+    "(document.head||document.documentElement).appendChild(s);\n"
+    "})();\n";
+
 void userscript_init(UserScriptManager *m) {
     memset(m, 0, sizeof(*m));
 }
@@ -365,6 +381,14 @@ bool userscript_create_defaults(const char *dir_path) {
     f = fopen(path, "w");
     if (f) {
         fputs(kDefaultYouTubeAdblock, f);
+        fclose(f);
+    }
+
+    /* write dark-mode.js.disabled (opt-in) */
+    snprintf(path, sizeof(path), "%s/dark-mode.js.disabled", dir_path);
+    f = fopen(path, "w");
+    if (f) {
+        fputs(kDefaultDarkMode, f);
         fclose(f);
     }
 
