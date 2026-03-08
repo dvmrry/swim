@@ -24,8 +24,22 @@ static void send_response(int fd, int status, const char *content_type,
         "Content-Length: %d\r\n"
         "Connection: close\r\n\r\n",
         status, status_text, content_type, body_len);
-    write(fd, header, hlen);
-    if (body && body_len > 0) write(fd, body, body_len);
+    const char *p = header;
+    int remaining = hlen;
+    while (remaining > 0) {
+        ssize_t n = write(fd, p, remaining);
+        if (n <= 0) return;
+        p += n;
+        remaining -= n;
+    }
+    const char *bp = body;
+    remaining = body_len;
+    while (remaining > 0) {
+        ssize_t n = write(fd, bp, remaining);
+        if (n <= 0) return;
+        bp += n;
+        remaining -= n;
+    }
 }
 
 static void send_json(int fd, int status, const char *json) {
@@ -63,6 +77,8 @@ static bool parse_request(int fd, HTTPRequest *req) {
     if (cl) content_length = atoi(cl + 15);
 
     int body_have = total - (int)(body_start - buf);
+
+    if (content_length > 1048576) return false;  // 1 MB max body
 
     if (content_length > 0) {
         req->body = malloc(content_length + 1);

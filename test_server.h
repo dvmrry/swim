@@ -18,8 +18,7 @@ typedef struct TestContext {
 } TestContext;
 
 // Starts HTTP server on given port in a background thread.
-// ctx must remain valid for the lifetime of the server (stack-allocated in main is fine
-// since main never returns — NSApp run loops forever).
+// ctx must remain valid for the lifetime of the server (static in main).
 void test_server_start(int port, TestContext *ctx);
 
 #endif // SWIM_TEST
