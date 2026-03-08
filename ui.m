@@ -1009,6 +1009,16 @@ SwimUI *ui_create(UICallbacks callbacks, bool compact_titlebar) {
     [ui->window center];
     [ui->window makeKeyAndOrderFront:nil];
 
+    // Terminate app when window is closed via GUI (red button / Cmd-W)
+    [[NSNotificationCenter defaultCenter]
+        addObserverForName:NSWindowWillCloseNotification
+        object:ui->window
+        queue:nil
+        usingBlock:^(NSNotification *note) {
+            (void)note;
+            [NSApp terminate:nil];
+        }];
+
     return ui;
 }
 
