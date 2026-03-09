@@ -685,6 +685,19 @@ static char *handle_tool_call(const char *name, const char *arguments) {
         return resp ? resp : strdup("{\"error\":\"connection failed\"}");
     }
 
+    if (strcmp(name, "eval") == 0) {
+        char *js = json_get_string(arguments, "js");
+        if (!js) return strdup("{\"error\":\"missing js\"}");
+        char *escaped = json_escape(js);
+        int bsize = (int)strlen(escaped) + 64;
+        char *body = malloc(bsize);
+        snprintf(body, bsize, "{\"js\":\"%s\"}", escaped);
+        free(escaped); free(js);
+        char *resp = http_post("/eval", body);
+        free(body);
+        return resp ? resp : strdup("{\"error\":\"connection failed\"}");
+    }
+
     return strdup("{\"error\":\"unknown tool\"}");
 }
 
@@ -823,11 +836,12 @@ int main(int argc, char *argv[]) {
                 }
                 char *result = handle_tool_call(tool_method, arguments ? arguments : "{}");
 
-                // Check if this is a screenshot (image content type)
+                // Check if this is binary content (image or resource)
                 bool is_image = (strstr(result, "\"type\":\"image\"") != NULL);
+                bool is_resource = (strstr(result, "\"type\":\"resource\"") != NULL);
 
-                if (is_image) {
-                    // Return as MCP image content directly
+                if (is_image || is_resource) {
+                    // Return as MCP content directly
                     int buf_size = (int)strlen(result) + 256;
                     char *response = malloc(buf_size);
                     snprintf(response, buf_size,
