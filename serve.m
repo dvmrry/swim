@@ -311,6 +311,53 @@ static NSDictionary *do_wait(NSDictionary *json, ServeContext *ctx) {
     return @{@"ok": @YES, @"loaded": @(loaded)};
 }
 
+static NSDictionary *do_wait_for(NSDictionary *json, ServeContext *ctx) {
+    NSString *selector = json[@"selector"];
+    if (!selector) return @{@"ok": @NO, @"error": @"missing selector"};
+
+    NSNumber *timeout_ms = json[@"timeout"];
+    double timeout_sec = timeout_ms ? [timeout_ms doubleValue] / 1000.0 : 10.0;
+    if (timeout_sec > 30.0) timeout_sec = 30.0;
+    if (timeout_sec < 0.1) timeout_sec = 0.1;
+
+    NSString *escapedSel = [selector stringByReplacingOccurrencesOfString:@"'"
+                                                              withString:@"\\'"];
+    NSString *js = [NSString stringWithFormat:
+        @"!!document.querySelector('%@')", escapedSel];
+
+    __block bool found = false;
+    dispatch_sync(dispatch_get_main_queue(), ^{
+        WKWebView *wv = (__bridge WKWebView *)ui_get_active_webview(ctx->ui);
+        if (!wv) return;
+
+        NSDate *deadline = [NSDate dateWithTimeIntervalSinceNow:timeout_sec];
+        while ([[NSDate date] compare:deadline] == NSOrderedAscending) {
+            __block BOOL done = NO;
+            __block BOOL exists = NO;
+
+            [wv evaluateJavaScript:js completionHandler:^(id res, NSError *error) {
+                if (!error && [res isKindOfClass:[NSNumber class]]) {
+                    exists = [res boolValue];
+                }
+                done = YES;
+            }];
+
+            NSDate *pollEnd = [NSDate dateWithTimeIntervalSinceNow:0.2];
+            while (!done && [[NSRunLoop currentRunLoop] runMode:NSDefaultRunLoopMode
+                                                     beforeDate:pollEnd]) {
+                if ([pollEnd timeIntervalSinceNow] <= 0) break;
+            }
+
+            if (exists) { found = true; break; }
+
+            // Sleep 100ms between polls
+            [[NSRunLoop currentRunLoop] runMode:NSDefaultRunLoopMode
+                                     beforeDate:[NSDate dateWithTimeIntervalSinceNow:0.1]];
+        }
+    });
+    return @{@"ok": @YES, @"found": @(found)};
+}
+
 static NSDictionary *do_eval(NSDictionary *json, ServeContext *ctx) {
     NSString *js = json[@"js"];
     if (!js) return @{@"ok": @NO, @"error": @"missing js"};
@@ -439,6 +486,102 @@ static NSDictionary *do_interact(ServeContext *ctx) {
     return result ?: @{@"ok": @NO, @"error": @"interact failed"};
 }
 
+static NSDictionary *do_fill(NSDictionary *json, ServeContext *ctx) {
+    NSArray *fields = json[@"fields"];
+    if (!fields || ![fields isKindOfClass:[NSArray class]] || fields.count == 0) {
+        // Single-field shorthand: {selector, value}
+        NSString *selector = json[@"selector"];
+        NSString *value = json[@"value"];
+        if (!selector) return @{@"ok": @NO, @"error": @"missing selector or fields array"};
+        fields = @[@{@"selector": selector, @"value": value ?: @""}];
+    }
+
+    // Build JS that fills all fields
+    NSMutableString *js = [NSMutableString stringWithString:@"(function(){var results=[];"];
+
+    for (NSDictionary *field in fields) {
+        NSString *sel = field[@"selector"];
+        if (!sel) continue;
+
+        NSString *escapedSel = [sel stringByReplacingOccurrencesOfString:@"\\"
+                                                             withString:@"\\\\"];
+        escapedSel = [escapedSel stringByReplacingOccurrencesOfString:@"'"
+                                                           withString:@"\\'"];
+        NSString *value = [field[@"value"] description] ?: @"";
+        NSString *escapedVal = [value stringByReplacingOccurrencesOfString:@"\\"
+                                                               withString:@"\\\\"];
+        escapedVal = [escapedVal stringByReplacingOccurrencesOfString:@"'"
+                                                          withString:@"\\'"];
+        escapedVal = [escapedVal stringByReplacingOccurrencesOfString:@"\n"
+                                                          withString:@"\\n"];
+
+        [js appendFormat:
+            @"(function(){"
+            "var el=document.querySelector('%@');"
+            "if(!el){results.push({selector:'%@',ok:false,error:'not found'});return}"
+            "if(el.tagName==='SELECT'){"
+            "  el.value='%@';"
+            "  el.dispatchEvent(new Event('change',{bubbles:true}));"
+            "  results.push({selector:'%@',ok:true})"
+            "}"
+            "else if(el.type==='checkbox'||el.type==='radio'){"
+            "  var want=('%@'==='true'||'%@'==='1'||'%@'==='on');"
+            "  if(el.checked!==want){el.click()}"
+            "  results.push({selector:'%@',ok:true})"
+            "}"
+            "else{"
+            "  var nSetter=Object.getOwnPropertyDescriptor("
+            "    window.HTMLInputElement.prototype,'value');"
+            "  var tSetter=Object.getOwnPropertyDescriptor("
+            "    window.HTMLTextAreaElement.prototype,'value');"
+            "  var setter=(nSetter&&nSetter.set)||(tSetter&&tSetter.set);"
+            "  if(setter)setter.call(el,'%@');"
+            "  else el.value='%@';"
+            "  el.dispatchEvent(new Event('input',{bubbles:true}));"
+            "  el.dispatchEvent(new Event('change',{bubbles:true}));"
+            "  results.push({selector:'%@',ok:true})"
+            "}"
+            "})();",
+            escapedSel, escapedSel,
+            escapedVal, escapedSel,
+            escapedVal, escapedVal, escapedVal, escapedSel,
+            escapedVal, escapedVal, escapedSel
+        ];
+    }
+
+    [js appendString:@"return JSON.stringify({ok:true,results:results})})()"];
+
+    __block NSDictionary *result = nil;
+    dispatch_sync(dispatch_get_main_queue(), ^{
+        WKWebView *wv = (__bridge WKWebView *)ui_get_active_webview(ctx->ui);
+        if (!wv) { result = @{@"ok": @NO, @"error": @"no active webview"}; return; }
+
+        __block NSDictionary *response = nil;
+        __block BOOL done = NO;
+
+        [wv evaluateJavaScript:js completionHandler:^(id res, NSError *error) {
+            if (error) {
+                response = @{@"ok": @NO, @"error": error.localizedDescription ?: @"unknown"};
+            } else if (res && [res isKindOfClass:[NSString class]]) {
+                NSData *data = [(NSString *)res dataUsingEncoding:NSUTF8StringEncoding];
+                response = [NSJSONSerialization JSONObjectWithData:data options:0 error:nil];
+            }
+            done = YES;
+        }];
+
+        NSDate *timeout = [NSDate dateWithTimeIntervalSinceNow:5.0];
+        while (!done && [[NSRunLoop currentRunLoop] runMode:NSDefaultRunLoopMode
+                                                beforeDate:timeout]) {
+            if ([timeout timeIntervalSinceNow] <= 0) break;
+        }
+
+        if (!done) result = @{@"ok": @NO, @"error": @"fill timeout"};
+        else if (response) result = response;
+        else result = @{@"ok": @NO, @"error": @"fill failed"};
+    });
+    return result ?: @{@"ok": @NO, @"error": @"fill failed"};
+}
+
 static NSDictionary *do_click(NSDictionary *json, ServeContext *ctx) {
     NSString *selector = json[@"selector"];
     NSString *text = json[@"text"];
@@ -556,6 +699,11 @@ static void handle_wait(int fd, HTTPRequest *req, ServeContext *ctx) {
     send_dict(fd, do_wait(json, ctx));
 }
 
+static void handle_wait_for(int fd, HTTPRequest *req, ServeContext *ctx) {
+    NSDictionary *json = parse_json_body(req->body, req->body_len);
+    send_dict(fd, do_wait_for(json, ctx));
+}
+
 static void handle_extract(int fd, ServeContext *ctx) {
     send_dict(fd, do_extract(ctx));
 }
@@ -567,6 +715,11 @@ static void handle_interact(int fd, ServeContext *ctx) {
 static void handle_eval(int fd, HTTPRequest *req, ServeContext *ctx) {
     NSDictionary *json = parse_json_body(req->body, req->body_len);
     send_dict(fd, do_eval(json, ctx));
+}
+
+static void handle_fill(int fd, HTTPRequest *req, ServeContext *ctx) {
+    NSDictionary *json = parse_json_body(req->body, req->body_len);
+    send_dict(fd, do_fill(json, ctx));
 }
 
 static void handle_click(int fd, HTTPRequest *req, ServeContext *ctx) {
@@ -610,12 +763,16 @@ static void handle_batch(int fd, HTTPRequest *req, ServeContext *ctx) {
             result = do_resize(step, ctx);
         } else if ([type isEqualToString:@"wait"]) {
             result = do_wait(step, ctx);
+        } else if ([type isEqualToString:@"wait_for"]) {
+            result = do_wait_for(step, ctx);
         } else if ([type isEqualToString:@"eval"]) {
             result = do_eval(step, ctx);
         } else if ([type isEqualToString:@"extract"]) {
             result = do_extract(ctx);
         } else if ([type isEqualToString:@"interact"]) {
             result = do_interact(ctx);
+        } else if ([type isEqualToString:@"fill"]) {
+            result = do_fill(step, ctx);
         } else if ([type isEqualToString:@"click"]) {
             result = do_click(step, ctx);
         } else if ([type isEqualToString:@"sleep"]) {
@@ -663,12 +820,16 @@ static void *server_thread(void *arg) {
             handle_resize(client_fd, &req, ctx);
         } else if (strcmp(req.method, "POST") == 0 && strcmp(req.path, "/wait") == 0) {
             handle_wait(client_fd, &req, ctx);
+        } else if (strcmp(req.method, "POST") == 0 && strcmp(req.path, "/wait_for") == 0) {
+            handle_wait_for(client_fd, &req, ctx);
         } else if (strcmp(req.method, "POST") == 0 && strcmp(req.path, "/eval") == 0) {
             handle_eval(client_fd, &req, ctx);
         } else if (strcmp(req.method, "GET") == 0 && strcmp(req.path, "/extract") == 0) {
             handle_extract(client_fd, ctx);
         } else if (strcmp(req.method, "GET") == 0 && strcmp(req.path, "/interact") == 0) {
             handle_interact(client_fd, ctx);
+        } else if (strcmp(req.method, "POST") == 0 && strcmp(req.path, "/fill") == 0) {
+            handle_fill(client_fd, &req, ctx);
         } else if (strcmp(req.method, "POST") == 0 && strcmp(req.path, "/click") == 0) {
             handle_click(client_fd, &req, ctx);
         } else if (strcmp(req.method, "POST") == 0 && strcmp(req.path, "/batch") == 0) {
