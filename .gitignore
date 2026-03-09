@@ -1,5 +1,9 @@
 swim
+swim-mcp
+swim.app/
 *.o
 *.dSYM/
 .DS_Store
 result
+extract_js.inc
+test-screenshots/
