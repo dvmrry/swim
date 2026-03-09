@@ -6,6 +6,8 @@
 #include <sys/socket.h>
 #include <netinet/in.h>
 #include <arpa/inet.h>
+#include <signal.h>
+#include <errno.h>
 
 // --- Configuration ---
 
@@ -18,35 +20,48 @@ static int g_port = 9111;
 static char *json_get_string(const char *json, const char *key) {
     char search[256];
     snprintf(search, sizeof(search), "\"%s\"", key);
-    const char *p = strstr(json, search);
-    if (!p) return NULL;
-    p += strlen(search);
-    while (*p && (*p == ' ' || *p == ':' || *p == '\t')) p++;
-    if (*p != '"') return NULL;
-    p++;
-    const char *end = p;
-    while (*end && *end != '"') {
-        if (*end == '\\') end++;
-        end++;
+    const char *p = json;
+    while ((p = strstr(p, search)) != NULL) {
+        p += strlen(search);
+        // Skip whitespace, require colon (must be a key, not a value)
+        const char *q = p;
+        while (*q == ' ' || *q == '\t') q++;
+        if (*q != ':') continue;
+        q++; // skip colon
+        while (*q == ' ' || *q == '\t') q++;
+        if (*q != '"') return NULL;
+        q++;
+        const char *end = q;
+        while (*end && *end != '"') {
+            if (*end == '\\') end++;
+            end++;
+        }
+        int len = (int)(end - q);
+        char *result = malloc(len + 1);
+        memcpy(result, q, len);
+        result[len] = '\0';
+        return result;
     }
-    int len = (int)(end - p);
-    char *result = malloc(len + 1);
-    memcpy(result, p, len);
-    result[len] = '\0';
-    return result;
+    return NULL;
 }
 
 // Find an integer value for a key
 static bool json_get_int(const char *json, const char *key, int *out) {
     char search[256];
     snprintf(search, sizeof(search), "\"%s\"", key);
-    const char *p = strstr(json, search);
-    if (!p) return false;
-    p += strlen(search);
-    while (*p && (*p == ' ' || *p == ':' || *p == '\t')) p++;
-    if (*p != '-' && (*p < '0' || *p > '9')) return false;
-    *out = atoi(p);
-    return true;
+    const char *p = json;
+    while ((p = strstr(p, search)) != NULL) {
+        p += strlen(search);
+        const char *q = p;
+        while (*q == ' ' || *q == '\t') q++;
+        if (*q != ':') continue;
+        q++;
+        while (*q == ' ' || *q == '\t') q++;
+        if (*q != '-' && (*q < '0' || *q > '9')) return false;
+        *out = atoi(q);
+        return true;
+    }
+    return false;
 }
 
 // Extract the "params" object as a raw substring
@@ -179,12 +194,26 @@ static char *base64_encode(const unsigned char *data, int len) {
     return out;
 }
 
+static FILE *g_dbg = NULL;
+
 // --- MCP Protocol ---
 
 static void send_mcp(const char *json) {
-    int len = (int)strlen(json);
-    printf("Content-Length: %d\r\n\r\n%s", len, json);
-    fflush(stdout);
+    int json_len = (int)strlen(json);
+    // Send as newline-delimited JSON (matching how Claude Code sends)
+    int total_len = json_len + 1;
+    char *buf = malloc(total_len);
+    memcpy(buf, json, json_len);
+    buf[json_len] = '\n';
+    if (g_dbg) { fprintf(g_dbg, "\n[sending %d bytes]\n%.*s\n", total_len, json_len, buf); fflush(g_dbg); }
+    int written = 0;
+    while (written < total_len) {
+        int n = (int)write(STDOUT_FILENO, buf + written, total_len - written);
+        if (g_dbg) { fprintf(g_dbg, "[write returned %d, errno=%d]\n", n, errno); fflush(g_dbg); }
+        if (n <= 0) break;
+        written += n;
+    }
+    free(buf);
 }
 
 static void send_mcp_result(const char *id_str, int id_int, bool id_is_string,
@@ -376,25 +405,64 @@ static char *handle_tool_call(const char *name, const char *arguments) {
 
 // --- Read MCP message from stdin ---
 
-static char *read_mcp_message(void) {
-    // Read Content-Length header
-    char line[256];
-    int content_length = 0;
+// Read a single byte from stdin (raw fd, no buffering issues)
+static int read_byte(void) {
+    unsigned char c;
+    int n = (int)read(STDIN_FILENO, &c, 1);
+    if (g_dbg && n == 1) { fprintf(g_dbg, "%c", c); fflush(g_dbg); }
+    if (g_dbg && n != 1) { fprintf(g_dbg, "\n[EOF n=%d errno=%d]\n", n, errno); fflush(g_dbg); }
+    return (n == 1) ? c : -1;
+}
 
-    while (fgets(line, sizeof(line), stdin)) {
+// Read a line from stdin into buf, return length (0 on EOF)
+static int read_line(char *buf, int cap) {
+    int i = 0;
+    while (i < cap - 1) {
+        int c = read_byte();
+        if (c < 0) return 0;
+        buf[i++] = (char)c;
+        if (c == '\n') break;
+    }
+    buf[i] = '\0';
+    return i;
+}
+
+static char *read_mcp_message(void) {
+    // Read first line
+    int cap = 65536;
+    char *buf = malloc(cap);
+    int len = read_line(buf, cap);
+    if (len <= 0) { free(buf); return NULL; }
+
+    // Newline-delimited JSON: line starts with '{'
+    if (buf[0] == '{') {
+        // Strip trailing newline/cr
+        while (len > 0 && (buf[len-1] == '\n' || buf[len-1] == '\r')) buf[--len] = '\0';
+        return buf;
+    }
+
+    // Content-Length framed (LSP-style)
+    int content_length = 0;
+    if (strncmp(buf, "Content-Length:", 15) == 0) {
+        content_length = atoi(buf + 15);
+    }
+
+    // Read remaining headers until empty line
+    char line[256];
+    while (read_line(line, sizeof(line)) > 0) {
         if (strncmp(line, "Content-Length:", 15) == 0) {
             content_length = atoi(line + 15);
         }
-        // Empty line = end of headers
         if (strcmp(line, "\r\n") == 0 || strcmp(line, "\n") == 0) break;
     }
 
+    free(buf);
     if (content_length <= 0 || content_length > 10485760) return NULL;
 
     char *body = malloc(content_length + 1);
     int total = 0;
     while (total < content_length) {
-        int n = (int)fread(body + total, 1, content_length - total, stdin);
+        int n = (int)read(STDIN_FILENO, body + total, content_length - total);
         if (n <= 0) { free(body); return NULL; }
         total += n;
     }
@@ -412,13 +480,19 @@ int main(int argc, char *argv[]) {
         }
     }
 
-    // Log to stderr (stdout is MCP protocol)
-    fprintf(stderr, "swim-mcp: connecting to swim on port %d\n", g_port);
+    // Ignore SIGPIPE (can happen on closed sockets)
+    signal(SIGPIPE, SIG_IGN);
+
+    // Debug: log to file
+    FILE *dbg = fopen("/tmp/swim-mcp.log", "w");
+    if (dbg) { fprintf(dbg, "started, port=%d, stdin=%d, stdout=%d\n", g_port, STDIN_FILENO, STDOUT_FILENO); fflush(dbg); }
+    g_dbg = dbg;
 
     // MCP message loop
     while (1) {
+        if (g_dbg) { fprintf(g_dbg, "\n[waiting for message]\n"); fflush(g_dbg); }
         char *msg = read_mcp_message();
-        if (!msg) break;
+        if (!msg) { if (g_dbg) { fprintf(g_dbg, "\n[read_mcp_message returned NULL]\n"); fflush(g_dbg); } break; }
 
         char *method = json_get_string(msg, "method");
         char *id_str = json_get_string(msg, "id");
@@ -434,7 +508,7 @@ int main(int argc, char *argv[]) {
 
         if (strcmp(method, "initialize") == 0) {
             send_mcp_result(id_str, id_int, id_is_string,
-                "{\"protocolVersion\":\"2024-11-05\","
+                "{\"protocolVersion\":\"2025-11-25\","
                 "\"capabilities\":{\"tools\":{}},"
                 "\"serverInfo\":{\"name\":\"swim-mcp\",\"version\":\"0.1.0\"}}");
         } else if (strcmp(method, "notifications/initialized") == 0) {
