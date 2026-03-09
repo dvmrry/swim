@@ -274,13 +274,15 @@ static const char *kToolsList =
     "{\"tools\":["
     "{\"name\":\"swim\","
     "\"description\":\"Control the swim browser. Methods: navigate (url), screenshot, extract, "
+    "navigate_back, navigate_forward, "
     "interact, fill (selector+value or fields[]), wait_for (selector|url_contains, timeout?), "
     "query (selector, attribute?, all?), tab (index), select (selector, text|value), "
     "scroll (selector), storage (type, action?, key?, value?), "
     "execute (command), action (action, count?), state, click (selector|text), hover (selector), key (key)\","
     "\"inputSchema\":{\"type\":\"object\","
     "\"properties\":{"
-    "\"method\":{\"type\":\"string\",\"enum\":[\"navigate\",\"screenshot\",\"extract\","
+    "\"method\":{\"type\":\"string\",\"enum\":[\"navigate\",\"navigate_back\",\"navigate_forward\","
+    "\"screenshot\",\"extract\","
     "\"interact\",\"fill\",\"wait_for\",\"query\",\"tab\",\"select\","
     "\"scroll\",\"storage\","
     "\"execute\",\"action\",\"state\",\"click\",\"hover\",\"key\"],"
@@ -336,6 +338,16 @@ static char *handle_tool_call(const char *name, const char *arguments) {
         free(url);
         char *resp = http_post("/command", body);
         free(body);
+        return resp ? resp : strdup("{\"error\":\"connection failed\"}");
+    }
+
+    if (strcmp(name, "navigate_back") == 0) {
+        char *resp = http_post("/action", "{\"action\":\"back\"}");
+        return resp ? resp : strdup("{\"error\":\"connection failed\"}");
+    }
+
+    if (strcmp(name, "navigate_forward") == 0) {
+        char *resp = http_post("/action", "{\"action\":\"forward\"}");
         return resp ? resp : strdup("{\"error\":\"connection failed\"}");
     }
 
