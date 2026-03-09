@@ -257,19 +257,26 @@ static const char *kToolsList =
     "{\"tools\":["
     "{\"name\":\"swim\","
     "\"description\":\"Control the swim browser. Methods: navigate (url), screenshot, extract, "
+    "interact, fill (selector+value or fields[]), wait_for (selector, timeout?), "
     "execute (command), action (action, count?), state, click (selector|text), key (key)\","
     "\"inputSchema\":{\"type\":\"object\","
     "\"properties\":{"
     "\"method\":{\"type\":\"string\",\"enum\":[\"navigate\",\"screenshot\",\"extract\","
+    "\"interact\",\"fill\",\"wait_for\","
     "\"execute\",\"action\",\"state\",\"click\",\"key\"],"
     "\"description\":\"The operation to perform\"},"
     "\"url\":{\"type\":\"string\",\"description\":\"URL to navigate to (navigate)\"},"
     "\"command\":{\"type\":\"string\",\"description\":\"Command to run (execute)\"},"
     "\"action\":{\"type\":\"string\",\"description\":\"Action name (action)\"},"
     "\"count\":{\"type\":\"integer\",\"description\":\"Repeat count (action)\"},"
-    "\"selector\":{\"type\":\"string\",\"description\":\"CSS selector (click)\"},"
+    "\"selector\":{\"type\":\"string\",\"description\":\"CSS selector (click, fill, wait_for)\"},"
     "\"text\":{\"type\":\"string\",\"description\":\"Text content to match (click)\"},"
-    "\"key\":{\"type\":\"string\",\"description\":\"Key to send (key)\"}},"
+    "\"key\":{\"type\":\"string\",\"description\":\"Key to send (key)\"},"
+    "\"value\":{\"type\":\"string\",\"description\":\"Value to set (fill)\"},"
+    "\"fields\":{\"type\":\"array\",\"description\":\"Array of {selector,value} pairs (fill)\","
+    "\"items\":{\"type\":\"object\",\"properties\":{"
+    "\"selector\":{\"type\":\"string\"},\"value\":{\"type\":\"string\"}}}},"
+    "\"timeout\":{\"type\":\"integer\",\"description\":\"Timeout in ms (wait_for, default 10000)\"}},"
     "\"required\":[\"method\"]}}"
     "]}";
 
@@ -328,6 +335,74 @@ static char *handle_tool_call(const char *name, const char *arguments) {
 
     if (strcmp(name, "extract") == 0) {
         char *resp = http_get("/extract");
+        return resp ? resp : strdup("{\"error\":\"connection failed\"}");
+    }
+
+    if (strcmp(name, "interact") == 0) {
+        char *resp = http_get("/interact");
+        return resp ? resp : strdup("{\"error\":\"connection failed\"}");
+    }
+
+    if (strcmp(name, "fill") == 0) {
+        // Support both single-field and multi-field
+        char *selector = json_get_string(arguments, "selector");
+        char *value = json_get_string(arguments, "value");
+        // Check for fields array — pass raw JSON through
+        const char *fa = strstr(arguments, "\"fields\"");
+        char *body = NULL;
+
+        if (fa) {
+            // Find the array
+            const char *p = fa + 8;
+            while (*p && *p != '[') p++;
+            if (*p == '[') {
+                int depth = 0;
+                const char *start = p;
+                while (*p) {
+                    if (*p == '[') depth++;
+                    else if (*p == ']') { depth--; if (depth == 0) { p++; break; } }
+                    else if (*p == '"') { p++; while (*p && *p != '"') { if (*p == '\\') p++; p++; } }
+                    p++;
+                }
+                int len = (int)(p - start);
+                int bsize = len + 64;
+                body = malloc(bsize);
+                snprintf(body, bsize, "{\"fields\":%.*s}", len, start);
+            }
+        }
+        if (!body && selector) {
+            char *esc_sel = json_escape(selector);
+            char *esc_val = value ? json_escape(value) : strdup("");
+            int bsize = (int)strlen(esc_sel) + (int)strlen(esc_val) + 64;
+            body = malloc(bsize);
+            snprintf(body, bsize, "{\"selector\":\"%s\",\"value\":\"%s\"}", esc_sel, esc_val);
+            free(esc_sel);
+            free(esc_val);
+        }
+        free(selector); free(value);
+        if (!body) return strdup("{\"error\":\"missing selector or fields\"}");
+        char *resp = http_post("/fill", body);
+        free(body);
+        return resp ? resp : strdup("{\"error\":\"connection failed\"}");
+    }
+
+    if (strcmp(name, "wait_for") == 0) {
+        char *selector = json_get_string(arguments, "selector");
+        if (!selector) return strdup("{\"error\":\"missing selector\"}");
+        char *escaped = json_escape(selector);
+        int timeout = 0;
+        bool has_timeout = json_get_int(arguments, "timeout", &timeout);
+        int bsize = (int)strlen(escaped) + 128;
+        char *body = malloc(bsize);
+        if (has_timeout && timeout > 0) {
+            snprintf(body, bsize, "{\"selector\":\"%s\",\"timeout\":%d}", escaped, timeout);
+        } else {
+            snprintf(body, bsize, "{\"selector\":\"%s\"}", escaped);
+        }
+        free(escaped);
+        free(selector);
+        char *resp = http_post("/wait_for", body);
+        free(body);
         return resp ? resp : strdup("{\"error\":\"connection failed\"}");
     }
 
