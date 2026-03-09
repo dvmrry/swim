@@ -855,6 +855,15 @@ static void on_load_changed(bool loading, double progress, int tab_id, void *ctx
     ui_set_progress(app.ui, progress);
 }
 
+static void on_nav_error(const char *error, int tab_id, void *ctx) {
+    (void)ctx;
+    if (error) {
+        browser_tab_set_error(&app.browser, tab_id, error);
+    } else {
+        browser_tab_clear_error(&app.browser, tab_id);
+    }
+}
+
 static void on_focus_changed(bool focused, void *ctx) {
     (void)ctx;
     app_set_mode(focused ? MODE_INSERT : MODE_NORMAL);
@@ -1014,6 +1023,7 @@ int main(int argc, const char *argv[]) {
             .on_url_changed = on_url_changed,
             .on_title_changed = on_title_changed,
             .on_load_changed = on_load_changed,
+            .on_nav_error = on_nav_error,
             .on_focus_changed = on_focus_changed,
             .on_hints_done = on_hints_done,
             .on_tab_selected = on_tab_selected,

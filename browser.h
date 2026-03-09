@@ -7,6 +7,7 @@ typedef struct Tab {
     int id;
     char url[2048];
     char title[256];
+    char last_error[512];  // last navigation error, empty if none
     bool loading;
     bool lazy;      // deferred load: navigate on first select
     double progress;
@@ -37,6 +38,8 @@ void browser_free(Browser *b);
 void browser_tab_set_url(Browser *b, int tab_id, const char *url);
 void browser_tab_set_title(Browser *b, int tab_id, const char *title);
 void browser_tab_set_loading(Browser *b, int tab_id, bool loading, double progress);
+void browser_tab_set_error(Browser *b, int tab_id, const char *error);
+void browser_tab_clear_error(Browser *b, int tab_id);
 
 // Find tab by id, returns index or -1
 int browser_find_tab(Browser *b, int tab_id);

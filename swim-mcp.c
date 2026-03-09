@@ -276,11 +276,13 @@ static const char *kToolsList =
     "\"description\":\"Control the swim browser. Methods: navigate (url), screenshot, extract, "
     "interact, fill (selector+value or fields[]), wait_for (selector|url_contains, timeout?), "
     "query (selector, attribute?, all?), tab (index), select (selector, text|value), "
+    "scroll (selector), storage (type, action?, key?, value?), "
     "execute (command), action (action, count?), state, click (selector|text), key (key)\","
     "\"inputSchema\":{\"type\":\"object\","
     "\"properties\":{"
     "\"method\":{\"type\":\"string\",\"enum\":[\"navigate\",\"screenshot\",\"extract\","
     "\"interact\",\"fill\",\"wait_for\",\"query\",\"tab\",\"select\","
+    "\"scroll\",\"storage\","
     "\"execute\",\"action\",\"state\",\"click\",\"key\"],"
     "\"description\":\"The operation to perform\"},"
     "\"url\":{\"type\":\"string\",\"description\":\"URL to navigate to (navigate)\"},"
@@ -298,7 +300,8 @@ static const char *kToolsList =
     "\"url_contains\":{\"type\":\"string\",\"description\":\"URL substring to wait for (wait_for)\"},"
     "\"attribute\":{\"type\":\"string\",\"description\":\"Attribute name to read (query)\"},"
     "\"all\":{\"type\":\"boolean\",\"description\":\"Query all matching elements (query)\"},"
-    "\"index\":{\"type\":\"integer\",\"description\":\"Tab index to switch to (tab)\"}},"
+    "\"index\":{\"type\":\"integer\",\"description\":\"Tab index to switch to (tab)\"},"
+    "\"type\":{\"type\":\"string\",\"description\":\"Storage type: cookie, localStorage, sessionStorage (storage)\"}},"
     "\"required\":[\"method\"]}}"
     "]}";
 
@@ -514,6 +517,54 @@ static char *handle_tool_call(const char *name, const char *arguments) {
         }
         free(esc_sel); free(selector); free(text); free(value);
         char *resp = http_post("/select", body);
+        free(body);
+        return resp ? resp : strdup("{\"error\":\"connection failed\"}");
+    }
+
+    if (strcmp(name, "scroll") == 0) {
+        char *selector = json_get_string(arguments, "selector");
+        if (!selector) return strdup("{\"error\":\"missing selector\"}");
+        char *escaped = json_escape(selector);
+        int bsize = (int)strlen(escaped) + 128;
+        char *body = malloc(bsize);
+        snprintf(body, bsize, "{\"selector\":\"%s\"}", escaped);
+        free(escaped); free(selector);
+        char *resp = http_post("/scroll", body);
+        free(body);
+        return resp ? resp : strdup("{\"error\":\"connection failed\"}");
+    }
+
+    if (strcmp(name, "storage") == 0) {
+        char *type = json_get_string(arguments, "type");
+        if (!type) return strdup("{\"error\":\"missing type\"}");
+        char *action = json_get_string(arguments, "action");
+        char *key = json_get_string(arguments, "key");
+        char *value = json_get_string(arguments, "value");
+
+        char *esc_type = json_escape(type);
+        char *esc_action = action ? json_escape(action) : strdup("get");
+        char *esc_key = key ? json_escape(key) : NULL;
+        char *esc_value = value ? json_escape(value) : NULL;
+
+        int bsize = 512;
+        char *body = malloc(bsize);
+        if (esc_key && esc_value) {
+            snprintf(body, bsize,
+                "{\"type\":\"%s\",\"action\":\"%s\",\"key\":\"%s\",\"value\":\"%s\"}",
+                esc_type, esc_action, esc_key, esc_value);
+        } else if (esc_key) {
+            snprintf(body, bsize,
+                "{\"type\":\"%s\",\"action\":\"%s\",\"key\":\"%s\"}",
+                esc_type, esc_action, esc_key);
+        } else {
+            snprintf(body, bsize,
+                "{\"type\":\"%s\",\"action\":\"%s\"}",
+                esc_type, esc_action);
+        }
+
+        free(esc_type); free(esc_action); free(esc_key); free(esc_value);
+        free(type); free(action); free(key); free(value);
+        char *resp = http_post("/storage", body);
         free(body);
         return resp ? resp : strdup("{\"error\":\"connection failed\"}");
     }

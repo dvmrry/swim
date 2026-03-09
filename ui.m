@@ -313,6 +313,9 @@ static SwimTabBarHandler *sTabBarHandler;
     (void)navigation;
     const char *url = [webView.URL.absoluteString UTF8String];
     const char *title = [webView.title UTF8String];
+    if (self.callbacks.on_nav_error) {
+        self.callbacks.on_nav_error(NULL, self.tabId, self.callbacks.ctx);
+    }
     if (self.callbacks.on_url_changed && url) {
         self.callbacks.on_url_changed(url, self.tabId, self.callbacks.ctx);
     }
@@ -332,6 +335,10 @@ static SwimTabBarHandler *sTabBarHandler;
         self.callbacks.on_load_changed(false, 1.0, self.tabId, self.callbacks.ctx);
     }
     NSLog(@"swim: nav error: %@", error.localizedDescription);
+    if (self.callbacks.on_nav_error) {
+        self.callbacks.on_nav_error([error.localizedDescription UTF8String],
+                                    self.tabId, self.callbacks.ctx);
+    }
     if (self.ui) {
         NSString *msg = [NSString stringWithFormat:@"Error: %@", error.localizedDescription];
         ui_set_status_message(self.ui, [msg UTF8String]);

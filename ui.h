@@ -15,6 +15,7 @@ typedef struct UICallbacks {
     void (*on_url_changed)(const char *url, int tab_id, void *ctx);
     void (*on_title_changed)(const char *title, int tab_id, void *ctx);
     void (*on_load_changed)(bool loading, double progress, int tab_id, void *ctx);
+    void (*on_nav_error)(const char *error, int tab_id, void *ctx);
     void (*on_focus_changed)(bool focused, void *ctx);
     void (*on_hints_done)(void *ctx);
     void (*on_tab_selected)(int index, void *ctx);

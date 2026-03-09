@@ -255,14 +255,18 @@ static NSDictionary *do_state(ServeContext *ctx) {
         NSMutableArray *tabs = [NSMutableArray array];
         for (int i = 0; i < ctx->browser->tab_count; i++) {
             Tab *t = &ctx->browser->tabs[i];
-            [tabs addObject:@{
+            NSMutableDictionary *tab = [NSMutableDictionary dictionaryWithDictionary:@{
                 @"url": [NSString stringWithUTF8String:t->url],
                 @"title": [NSString stringWithUTF8String:t->title],
                 @"lazy": @(t->lazy),
             }];
+            if (t->last_error[0]) {
+                tab[@"error"] = [NSString stringWithUTF8String:t->last_error];
+            }
+            [tabs addObject:tab];
         }
 
-        result = @{
+        NSMutableDictionary *state = [NSMutableDictionary dictionaryWithDictionary:@{
             @"ok": @YES,
             @"mode": [NSString stringWithUTF8String:mode_str],
             @"url": active ? [NSString stringWithUTF8String:active->url] : @"",
@@ -272,7 +276,11 @@ static NSDictionary *do_state(ServeContext *ctx) {
             @"tabs": tabs,
             @"pending_keys": [NSString stringWithUTF8String:ctx->mode->pending_keys],
             @"count": @(ctx->mode->count),
-        };
+        }];
+        if (active && active->last_error[0]) {
+            state[@"error"] = [NSString stringWithUTF8String:active->last_error];
+        }
+        result = state;
     });
     return result ?: @{@"ok": @NO, @"error": @"state failed"};
 }
@@ -874,6 +882,194 @@ static NSDictionary *do_select(NSDictionary *json, ServeContext *ctx) {
     return result ?: @{@"ok": @NO, @"error": @"select failed"};
 }
 
+// --- Feature: /scroll — scroll element into view ---
+
+static NSDictionary *do_scroll(NSDictionary *json, ServeContext *ctx) {
+    NSString *selector = json[@"selector"];
+    if (!selector) return @{@"ok": @NO, @"error": @"missing selector"};
+
+    NSString *escapedSel = [selector stringByReplacingOccurrencesOfString:@"\\"
+                                                              withString:@"\\\\"];
+    escapedSel = [escapedSel stringByReplacingOccurrencesOfString:@"'"
+                                                       withString:@"\\'"];
+
+    NSString *behavior = json[@"behavior"] ?: @"smooth";
+    NSString *block = json[@"block"] ?: @"center";
+
+    NSString *js = [NSString stringWithFormat:
+        @"(function(){"
+        "var el=document.querySelector('%@');"
+        "if(!el)return JSON.stringify({ok:false,error:'not found'});"
+        "el.scrollIntoView({behavior:'%@',block:'%@'});"
+        "var r=el.getBoundingClientRect();"
+        "return JSON.stringify({ok:true,"
+        "  rect:{x:Math.round(r.x),y:Math.round(r.y),"
+        "        width:Math.round(r.width),height:Math.round(r.height)}})"
+        "})()", escapedSel, behavior, block];
+
+    __block NSDictionary *result = nil;
+    dispatch_sync(dispatch_get_main_queue(), ^{
+        WKWebView *wv = (__bridge WKWebView *)ui_get_active_webview(ctx->ui);
+        if (!wv) { result = @{@"ok": @NO, @"error": @"no active webview"}; return; }
+
+        __block BOOL done = NO;
+        __block NSDictionary *response = nil;
+
+        [wv evaluateJavaScript:js completionHandler:^(id res, NSError *error) {
+            if (error) {
+                response = @{@"ok": @NO, @"error": error.localizedDescription ?: @"unknown"};
+            } else if (res && [res isKindOfClass:[NSString class]]) {
+                NSData *data = [(NSString *)res dataUsingEncoding:NSUTF8StringEncoding];
+                response = [NSJSONSerialization JSONObjectWithData:data options:0 error:nil];
+            }
+            done = YES;
+        }];
+
+        NSDate *timeout = [NSDate dateWithTimeIntervalSinceNow:5.0];
+        while (!done && [[NSRunLoop currentRunLoop] runMode:NSDefaultRunLoopMode
+                                                beforeDate:timeout]) {
+            if ([timeout timeIntervalSinceNow] <= 0) break;
+        }
+
+        if (!done) result = @{@"ok": @NO, @"error": @"scroll timeout"};
+        else if (response) result = response;
+        else result = @{@"ok": @NO, @"error": @"scroll failed"};
+    });
+    return result ?: @{@"ok": @NO, @"error": @"scroll failed"};
+}
+
+// --- Feature: /storage — read/write cookies, localStorage, sessionStorage ---
+
+static NSDictionary *do_storage(NSDictionary *json, ServeContext *ctx) {
+    NSString *type = json[@"type"];
+    if (!type) return @{@"ok": @NO, @"error": @"missing type (cookie, localStorage, sessionStorage)"};
+
+    NSString *action = json[@"action"] ?: @"get";
+    NSString *key = json[@"key"];
+    NSString *value = json[@"value"];
+
+    NSMutableString *js = [NSMutableString stringWithString:@"(function(){try{"];
+
+    if ([type isEqualToString:@"cookie"]) {
+        if ([action isEqualToString:@"get"]) {
+            if (key) {
+                NSString *escapedKey = [key stringByReplacingOccurrencesOfString:@"'"
+                                                                     withString:@"\\'"];
+                [js appendFormat:
+                    @"var pairs=document.cookie.split('; ');"
+                    "for(var i=0;i<pairs.length;i++){"
+                    "  var p=pairs[i].split('=');"
+                    "  if(decodeURIComponent(p[0])==='%@')"
+                    "    return JSON.stringify({ok:true,value:decodeURIComponent(p.slice(1).join('='))})"
+                    "}"
+                    "return JSON.stringify({ok:true,value:null})", escapedKey];
+            } else {
+                [js appendString:
+                    @"var result={};"
+                    "var pairs=document.cookie.split('; ');"
+                    "for(var i=0;i<pairs.length;i++){"
+                    "  if(!pairs[i])continue;"
+                    "  var p=pairs[i].split('=');"
+                    "  result[decodeURIComponent(p[0])]=decodeURIComponent(p.slice(1).join('='))"
+                    "}"
+                    "return JSON.stringify({ok:true,cookies:result})"];
+            }
+        } else if ([action isEqualToString:@"set"]) {
+            if (!key) { return @{@"ok": @NO, @"error": @"missing key"}; }
+            NSString *escapedKey = [key stringByReplacingOccurrencesOfString:@"'"
+                                                                 withString:@"\\'"];
+            NSString *escapedVal = [(value ?: @"") stringByReplacingOccurrencesOfString:@"'"
+                                                                            withString:@"\\'"];
+            NSString *extra = json[@"options"] ?: @"";
+            NSString *escapedExtra = [extra stringByReplacingOccurrencesOfString:@"'"
+                                                                     withString:@"\\'"];
+            [js appendFormat:
+                @"document.cookie=encodeURIComponent('%@')+'='+encodeURIComponent('%@')+'%@';"
+                "return JSON.stringify({ok:true})",
+                escapedKey, escapedVal,
+                escapedExtra.length > 0 ? [NSString stringWithFormat:@";%@", escapedExtra] : @""];
+        } else if ([action isEqualToString:@"delete"]) {
+            if (!key) { return @{@"ok": @NO, @"error": @"missing key"}; }
+            NSString *escapedKey = [key stringByReplacingOccurrencesOfString:@"'"
+                                                                 withString:@"\\'"];
+            [js appendFormat:
+                @"document.cookie=encodeURIComponent('%@')+'=;expires=Thu, 01 Jan 1970 00:00:00 GMT;path=/';"
+                "return JSON.stringify({ok:true})", escapedKey];
+        }
+    } else if ([type isEqualToString:@"localStorage"] || [type isEqualToString:@"sessionStorage"]) {
+        NSString *store = [type isEqualToString:@"localStorage"] ? @"localStorage" : @"sessionStorage";
+        if ([action isEqualToString:@"get"]) {
+            if (key) {
+                NSString *escapedKey = [key stringByReplacingOccurrencesOfString:@"'"
+                                                                     withString:@"\\'"];
+                [js appendFormat:
+                    @"var v=%@.getItem('%@');"
+                    "return JSON.stringify({ok:true,value:v})", store, escapedKey];
+            } else {
+                [js appendFormat:
+                    @"var result={};for(var i=0;i<%@.length;i++){"
+                    "  var k=%@.key(i);result[k]=%@.getItem(k)}"
+                    "return JSON.stringify({ok:true,entries:result,count:%@.length})",
+                    store, store, store, store];
+            }
+        } else if ([action isEqualToString:@"set"]) {
+            if (!key) { return @{@"ok": @NO, @"error": @"missing key"}; }
+            NSString *escapedKey = [key stringByReplacingOccurrencesOfString:@"'"
+                                                                 withString:@"\\'"];
+            NSString *escapedVal = [(value ?: @"") stringByReplacingOccurrencesOfString:@"'"
+                                                                            withString:@"\\'"];
+            [js appendFormat:
+                @"%@.setItem('%@','%@');"
+                "return JSON.stringify({ok:true})", store, escapedKey, escapedVal];
+        } else if ([action isEqualToString:@"delete"]) {
+            if (!key) { return @{@"ok": @NO, @"error": @"missing key"}; }
+            NSString *escapedKey = [key stringByReplacingOccurrencesOfString:@"'"
+                                                                 withString:@"\\'"];
+            [js appendFormat:
+                @"%@.removeItem('%@');"
+                "return JSON.stringify({ok:true})", store, escapedKey];
+        } else if ([action isEqualToString:@"clear"]) {
+            [js appendFormat:
+                @"%@.clear();"
+                "return JSON.stringify({ok:true})", store];
+        }
+    } else {
+        return @{@"ok": @NO, @"error": @"unknown type: use cookie, localStorage, or sessionStorage"};
+    }
+
+    [js appendString:@"}catch(e){return JSON.stringify({ok:false,error:e.message})}})()"];
+
+    __block NSDictionary *result = nil;
+    dispatch_sync(dispatch_get_main_queue(), ^{
+        WKWebView *wv = (__bridge WKWebView *)ui_get_active_webview(ctx->ui);
+        if (!wv) { result = @{@"ok": @NO, @"error": @"no active webview"}; return; }
+
+        __block BOOL done = NO;
+        __block NSDictionary *response = nil;
+
+        [wv evaluateJavaScript:js completionHandler:^(id res, NSError *error) {
+            if (error) {
+                response = @{@"ok": @NO, @"error": error.localizedDescription ?: @"unknown"};
+            } else if (res && [res isKindOfClass:[NSString class]]) {
+                NSData *data = [(NSString *)res dataUsingEncoding:NSUTF8StringEncoding];
+                response = [NSJSONSerialization JSONObjectWithData:data options:0 error:nil];
+            }
+            done = YES;
+        }];
+
+        NSDate *timeout = [NSDate dateWithTimeIntervalSinceNow:5.0];
+        while (!done && [[NSRunLoop currentRunLoop] runMode:NSDefaultRunLoopMode
+                                                beforeDate:timeout]) {
+            if ([timeout timeIntervalSinceNow] <= 0) break;
+        }
+
+        if (!done) result = @{@"ok": @NO, @"error": @"storage timeout"};
+        else if (response) result = response;
+        else result = @{@"ok": @NO, @"error": @"storage failed"};
+    });
+    return result ?: @{@"ok": @NO, @"error": @"storage failed"};
+}
+
 static NSDictionary *do_sleep_step(NSDictionary *json) {
     NSNumber *ms = json[@"ms"];
     double seconds = ms ? [ms doubleValue] / 1000.0 : 0.1;
@@ -990,6 +1186,26 @@ static void handle_select(int fd, HTTPRequest *req, ServeContext *ctx) {
     send_dict(fd, do_select(json, ctx));
 }
 
+static void handle_scroll(int fd, HTTPRequest *req, ServeContext *ctx) {
+    if (!req->body || req->body_len <= 0) {
+        send_json(fd, 400, "{\"error\":\"missing body\"}");
+        return;
+    }
+    NSData *data = [NSData dataWithBytes:req->body length:req->body_len];
+    NSDictionary *json = [NSJSONSerialization JSONObjectWithData:data options:0 error:nil];
+    send_dict(fd, do_scroll(json, ctx));
+}
+
+static void handle_storage(int fd, HTTPRequest *req, ServeContext *ctx) {
+    if (!req->body || req->body_len <= 0) {
+        send_json(fd, 400, "{\"error\":\"missing body\"}");
+        return;
+    }
+    NSData *data = [NSData dataWithBytes:req->body length:req->body_len];
+    NSDictionary *json = [NSJSONSerialization JSONObjectWithData:data options:0 error:nil];
+    send_dict(fd, do_storage(json, ctx));
+}
+
 static void handle_batch(int fd, HTTPRequest *req, ServeContext *ctx) {
     if (!req->body || req->body_len <= 0) {
         send_json(fd, 400, "{\"error\":\"missing body\"}");
@@ -1044,6 +1260,10 @@ static void handle_batch(int fd, HTTPRequest *req, ServeContext *ctx) {
             result = do_tab(step, ctx);
         } else if ([type isEqualToString:@"select"]) {
             result = do_select(step, ctx);
+        } else if ([type isEqualToString:@"scroll"]) {
+            result = do_scroll(step, ctx);
+        } else if ([type isEqualToString:@"storage"]) {
+            result = do_storage(step, ctx);
         } else if ([type isEqualToString:@"sleep"]) {
             result = do_sleep_step(step);
         } else {
@@ -1107,6 +1327,10 @@ static void *server_thread(void *arg) {
             handle_tab(client_fd, &req, ctx);
         } else if (strcmp(req.method, "POST") == 0 && strcmp(req.path, "/select") == 0) {
             handle_select(client_fd, &req, ctx);
+        } else if (strcmp(req.method, "POST") == 0 && strcmp(req.path, "/scroll") == 0) {
+            handle_scroll(client_fd, &req, ctx);
+        } else if (strcmp(req.method, "POST") == 0 && strcmp(req.path, "/storage") == 0) {
+            handle_storage(client_fd, &req, ctx);
         } else if (strcmp(req.method, "POST") == 0 && strcmp(req.path, "/batch") == 0) {
             handle_batch(client_fd, &req, ctx);
         } else {

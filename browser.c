@@ -121,6 +121,20 @@ void browser_tab_set_loading(Browser *b, int tab_id, bool loading, double progre
     b->tabs[i].progress = progress;
 }
 
+void browser_tab_set_error(Browser *b, int tab_id, const char *error) {
+    int i = browser_find_tab(b, tab_id);
+    if (i < 0) return;
+    if (error) {
+        snprintf(b->tabs[i].last_error, sizeof(b->tabs[i].last_error), "%s", error);
+    } else {
+        b->tabs[i].last_error[0] = '\0';
+    }
+}
+
+void browser_tab_clear_error(Browser *b, int tab_id) {
+    browser_tab_set_error(b, tab_id, NULL);
+}
+
 void browser_free(Browser *b) {
     free(b->tabs);
     for (int i = 0; i < b->closed_count; i++) {
