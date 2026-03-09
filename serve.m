@@ -8,6 +8,10 @@
 
 static int g_server_fd;
 
+static const char *kExtractJS =
+#include "extract_js.inc"
+;
+
 // --- HTTP helpers ---
 
 static void send_response(int fd, int status, const char *content_type,
@@ -347,6 +351,48 @@ static NSDictionary *do_eval(NSDictionary *json, ServeContext *ctx) {
     return result ?: @{@"ok": @NO, @"error": @"eval failed"};
 }
 
+static NSDictionary *do_extract(ServeContext *ctx) {
+    __block NSDictionary *result = nil;
+    dispatch_sync(dispatch_get_main_queue(), ^{
+        WKWebView *wv = (__bridge WKWebView *)ui_get_active_webview(ctx->ui);
+        if (!wv) { result = @{@"ok": @NO, @"error": @"no active webview"}; return; }
+
+        __block NSDictionary *response = nil;
+        __block BOOL done = NO;
+
+        NSString *js = [NSString stringWithUTF8String:kExtractJS];
+        [wv evaluateJavaScript:js completionHandler:^(id res, NSError *error) {
+            if (error) {
+                response = @{@"ok": @NO, @"error": error.localizedDescription ?: @"unknown"};
+            } else if (res && [res isKindOfClass:[NSString class]]) {
+                NSData *data = [(NSString *)res dataUsingEncoding:NSUTF8StringEncoding];
+                NSDictionary *parsed = [NSJSONSerialization JSONObjectWithData:data options:0 error:nil];
+                if (parsed) {
+                    NSMutableDictionary *r = [parsed mutableCopy];
+                    r[@"ok"] = @YES;
+                    response = r;
+                } else {
+                    response = @{@"ok": @NO, @"error": @"parse failed"};
+                }
+            } else {
+                response = @{@"ok": @NO, @"error": @"no result"};
+            }
+            done = YES;
+        }];
+
+        NSDate *timeout = [NSDate dateWithTimeIntervalSinceNow:10.0];
+        while (!done && [[NSRunLoop currentRunLoop] runMode:NSDefaultRunLoopMode
+                                                beforeDate:timeout]) {
+            if ([timeout timeIntervalSinceNow] <= 0) break;
+        }
+
+        if (!done) result = @{@"ok": @NO, @"error": @"extract timeout"};
+        else if (response) result = response;
+        else result = @{@"ok": @NO, @"error": @"extract failed"};
+    });
+    return result ?: @{@"ok": @NO, @"error": @"extract failed"};
+}
+
 static NSDictionary *do_sleep_step(NSDictionary *json) {
     NSNumber *ms = json[@"ms"];
     double seconds = ms ? [ms doubleValue] / 1000.0 : 0.1;
@@ -405,6 +451,10 @@ static void handle_wait(int fd, HTTPRequest *req, ServeContext *ctx) {
     send_dict(fd, do_wait(json, ctx));
 }
 
+static void handle_extract(int fd, ServeContext *ctx) {
+    send_dict(fd, do_extract(ctx));
+}
+
 static void handle_eval(int fd, HTTPRequest *req, ServeContext *ctx) {
     NSDictionary *json = parse_json_body(req->body, req->body_len);
     send_dict(fd, do_eval(json, ctx));
@@ -448,6 +498,8 @@ static void handle_batch(int fd, HTTPRequest *req, ServeContext *ctx) {
             result = do_wait(step, ctx);
         } else if ([type isEqualToString:@"eval"]) {
             result = do_eval(step, ctx);
+        } else if ([type isEqualToString:@"extract"]) {
+            result = do_extract(ctx);
         } else if ([type isEqualToString:@"sleep"]) {
             result = do_sleep_step(step);
         } else {
@@ -495,6 +547,8 @@ static void *server_thread(void *arg) {
             handle_wait(client_fd, &req, ctx);
         } else if (strcmp(req.method, "POST") == 0 && strcmp(req.path, "/eval") == 0) {
             handle_eval(client_fd, &req, ctx);
+        } else if (strcmp(req.method, "GET") == 0 && strcmp(req.path, "/extract") == 0) {
+            handle_extract(client_fd, ctx);
         } else if (strcmp(req.method, "POST") == 0 && strcmp(req.path, "/batch") == 0) {
             handle_batch(client_fd, &req, ctx);
         } else {
