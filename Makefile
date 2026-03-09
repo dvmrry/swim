@@ -1,18 +1,21 @@
 CC = clang
 CFLAGS = -fobjc-arc -Wall -Wextra -Wpedantic -std=c17
-FRAMEWORKS = -framework Cocoa -framework WebKit -framework QuartzCore
+FRAMEWORKS = -framework Cocoa -framework WebKit -framework QuartzCore -framework Network
 
-SRC_C = browser.c input.c commands.c storage.c config.c userscript.c theme.c
-SRC_M = main.m ui.m
+SRC_C = browser.c input.c commands.c storage.c config.c userscript.c theme.c focus.c
+SRC_M = main.m ui.m serve.m
 SRC = $(SRC_C) $(SRC_M)
+HEADERS = browser.h input.h commands.h ui.h storage.h config.h userscript.h theme.h focus.h serve.h
 
-swim: $(SRC) browser.h input.h commands.h ui.h storage.h config.h userscript.h theme.h Info.plist
+swim: $(SRC) $(HEADERS) focus_js.inc Info.plist
 	$(CC) $(CFLAGS) $(FRAMEWORKS) -sectcreate __TEXT __info_plist Info.plist $(SRC) -o swim
 
-test-ui: $(SRC) test_server.m test_server.h browser.h input.h commands.h ui.h storage.h config.h userscript.h theme.h Info.plist
-	$(CC) $(CFLAGS) -DSWIM_TEST $(FRAMEWORKS) -sectcreate __TEXT __info_plist Info.plist $(SRC) test_server.m -o swim-test
+# Convert focus.js to a C string literal for embedding
+focus_js.inc: js/focus.js
+	@echo "Generating focus_js.inc"
+	@sed 's/\\/\\\\/g; s/"/\\"/g; s/^/"/; s/$$/\\n"/' js/focus.js > focus_js.inc
 
 clean:
-	rm -f swim swim-test
+	rm -f swim swim-mcp focus_js.inc
 
-.PHONY: clean test-ui
+.PHONY: clean

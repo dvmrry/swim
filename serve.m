@@ -1,12 +1,10 @@
-#ifdef SWIM_TEST
-
 #import <Cocoa/Cocoa.h>
 #import <WebKit/WebKit.h>
 #include <sys/socket.h>
 #include <netinet/in.h>
 #include <pthread.h>
 #include <unistd.h>
-#include "test_server.h"
+#include "serve.h"
 
 static int g_server_fd;
 
@@ -178,7 +176,7 @@ static bool translate_key(const char *name, const char **out_key, unsigned int *
 
 // --- Internal handlers that return result dictionaries (for batch use) ---
 
-static NSDictionary *do_action(NSDictionary *json, TestContext *ctx) {
+static NSDictionary *do_action(NSDictionary *json, ServeContext *ctx) {
     NSString *action = json[@"action"];
     if (!action) return @{@"ok": @NO, @"error": @"missing action"};
 
@@ -191,7 +189,7 @@ static NSDictionary *do_action(NSDictionary *json, TestContext *ctx) {
     return @{@"ok": @YES};
 }
 
-static NSDictionary *do_command(NSDictionary *json, TestContext *ctx) {
+static NSDictionary *do_command(NSDictionary *json, ServeContext *ctx) {
     NSString *command = json[@"command"];
     if (!command) return @{@"ok": @NO, @"error": @"missing command"};
 
@@ -202,7 +200,7 @@ static NSDictionary *do_command(NSDictionary *json, TestContext *ctx) {
     return @{@"ok": @(ok)};
 }
 
-static NSDictionary *do_key(NSDictionary *json, TestContext *ctx) {
+static NSDictionary *do_key(NSDictionary *json, ServeContext *ctx) {
     NSString *key = json[@"key"];
     if (!key) return @{@"ok": @NO, @"error": @"missing key"};
 
@@ -219,7 +217,7 @@ static NSDictionary *do_key(NSDictionary *json, TestContext *ctx) {
     return @{@"ok": @YES, @"consumed": @(consumed)};
 }
 
-static NSDictionary *do_screenshot(TestContext *ctx) {
+static NSDictionary *do_screenshot(ServeContext *ctx) {
     __block NSData *png = nil;
     dispatch_sync(dispatch_get_main_queue(), ^{
         void *data = ui_screenshot(ctx->ui);
@@ -233,7 +231,7 @@ static NSDictionary *do_screenshot(TestContext *ctx) {
     return @{@"ok": @NO, @"error": @"screenshot failed"};
 }
 
-static NSDictionary *do_state(TestContext *ctx) {
+static NSDictionary *do_state(ServeContext *ctx) {
     __block NSDictionary *result = nil;
     dispatch_sync(dispatch_get_main_queue(), ^{
         const char *mode_str = "NORMAL";
@@ -271,7 +269,7 @@ static NSDictionary *do_state(TestContext *ctx) {
     return result ?: @{@"ok": @NO, @"error": @"state failed"};
 }
 
-static NSDictionary *do_resize(NSDictionary *json, TestContext *ctx) {
+static NSDictionary *do_resize(NSDictionary *json, ServeContext *ctx) {
     NSNumber *width = json[@"width"];
     NSNumber *height = json[@"height"];
     if (!width || !height) return @{@"ok": @NO, @"error": @"missing width/height"};
@@ -286,7 +284,7 @@ static NSDictionary *do_resize(NSDictionary *json, TestContext *ctx) {
     return @{@"ok": @YES};
 }
 
-static NSDictionary *do_wait(NSDictionary *json, TestContext *ctx) {
+static NSDictionary *do_wait(NSDictionary *json, ServeContext *ctx) {
     NSNumber *timeout_ms = json[@"timeout"];
     double timeout_sec = timeout_ms ? [timeout_ms doubleValue] / 1000.0 : 10.0;
     if (timeout_sec > 30.0) timeout_sec = 30.0;
@@ -305,7 +303,7 @@ static NSDictionary *do_wait(NSDictionary *json, TestContext *ctx) {
     return @{@"ok": @YES, @"loaded": @(loaded)};
 }
 
-static NSDictionary *do_eval(NSDictionary *json, TestContext *ctx) {
+static NSDictionary *do_eval(NSDictionary *json, ServeContext *ctx) {
     NSString *js = json[@"js"];
     if (!js) return @{@"ok": @NO, @"error": @"missing js"};
 
@@ -364,22 +362,22 @@ static void handle_health(int fd) {
     send_json(fd, 200, "{\"ok\":true}");
 }
 
-static void handle_action(int fd, HTTPRequest *req, TestContext *ctx) {
+static void handle_action(int fd, HTTPRequest *req, ServeContext *ctx) {
     NSDictionary *json = parse_json_body(req->body, req->body_len);
     send_dict(fd, do_action(json, ctx));
 }
 
-static void handle_command(int fd, HTTPRequest *req, TestContext *ctx) {
+static void handle_command(int fd, HTTPRequest *req, ServeContext *ctx) {
     NSDictionary *json = parse_json_body(req->body, req->body_len);
     send_dict(fd, do_command(json, ctx));
 }
 
-static void handle_key(int fd, HTTPRequest *req, TestContext *ctx) {
+static void handle_key(int fd, HTTPRequest *req, ServeContext *ctx) {
     NSDictionary *json = parse_json_body(req->body, req->body_len);
     send_dict(fd, do_key(json, ctx));
 }
 
-static void handle_screenshot(int fd, TestContext *ctx) {
+static void handle_screenshot(int fd, ServeContext *ctx) {
     // Direct endpoint still sends raw PNG (not base64)
     __block NSData *png = nil;
     dispatch_sync(dispatch_get_main_queue(), ^{
@@ -393,26 +391,26 @@ static void handle_screenshot(int fd, TestContext *ctx) {
     }
 }
 
-static void handle_state(int fd, TestContext *ctx) {
+static void handle_state(int fd, ServeContext *ctx) {
     send_dict(fd, do_state(ctx));
 }
 
-static void handle_resize(int fd, HTTPRequest *req, TestContext *ctx) {
+static void handle_resize(int fd, HTTPRequest *req, ServeContext *ctx) {
     NSDictionary *json = parse_json_body(req->body, req->body_len);
     send_dict(fd, do_resize(json, ctx));
 }
 
-static void handle_wait(int fd, HTTPRequest *req, TestContext *ctx) {
+static void handle_wait(int fd, HTTPRequest *req, ServeContext *ctx) {
     NSDictionary *json = parse_json_body(req->body, req->body_len);
     send_dict(fd, do_wait(json, ctx));
 }
 
-static void handle_eval(int fd, HTTPRequest *req, TestContext *ctx) {
+static void handle_eval(int fd, HTTPRequest *req, ServeContext *ctx) {
     NSDictionary *json = parse_json_body(req->body, req->body_len);
     send_dict(fd, do_eval(json, ctx));
 }
 
-static void handle_batch(int fd, HTTPRequest *req, TestContext *ctx) {
+static void handle_batch(int fd, HTTPRequest *req, ServeContext *ctx) {
     if (!req->body || req->body_len <= 0) {
         send_json(fd, 400, "{\"error\":\"missing body\"}");
         return;
@@ -467,7 +465,7 @@ static void handle_batch(int fd, HTTPRequest *req, TestContext *ctx) {
 // --- Server thread ---
 
 static void *server_thread(void *arg) {
-    TestContext *ctx = (TestContext *)arg;
+    ServeContext *ctx = (ServeContext *)arg;
 
     while (1) {
         int client_fd = accept(g_server_fd, NULL, NULL);
@@ -511,7 +509,7 @@ static void *server_thread(void *arg) {
 
 // --- Public API ---
 
-void test_server_start(int port, TestContext *ctx) {
+void serve_start(int port, ServeContext *ctx) {
     int fd = socket(AF_INET, SOCK_STREAM, 0);
     if (fd < 0) { perror("socket"); return; }
 
@@ -531,12 +529,10 @@ void test_server_start(int port, TestContext *ctx) {
         perror("listen"); close(fd); return;
     }
 
-    fprintf(stderr, "Test server listening on port %d\n", port);
+    fprintf(stderr, "swim: serving on port %d\n", port);
 
     g_server_fd = fd;
     pthread_t tid;
     pthread_create(&tid, NULL, server_thread, ctx);
     pthread_detach(tid);
 }
-
-#endif // SWIM_TEST

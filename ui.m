@@ -1,5 +1,7 @@
 #import <Cocoa/Cocoa.h>
 #import <WebKit/WebKit.h>
+#import <Network/Network.h>
+#include <strings.h>
 #include "ui.h"
 
 #define MAX_TABS 128
@@ -50,6 +52,7 @@ static const char *mode_name(Mode mode) {
 @interface SwimNavDelegate : NSObject <WKNavigationDelegate>
 @property (assign) UICallbacks callbacks;
 @property (assign) int tabId;
+@property (assign) SwimUI *ui;
 @property (weak) id downloadDelegate;
 @end
 
@@ -63,6 +66,7 @@ static const char *mode_name(Mode mode) {
 
 @interface SwimScriptHandler : NSObject <WKScriptMessageHandler>
 @property (assign) UICallbacks callbacks;
+@property (assign) SwimUI *ui;
 @end
 
 @implementation SwimScriptHandler
@@ -84,6 +88,15 @@ static const char *mode_name(Mode mode) {
             snprintf(cmd, sizeof(cmd), "tabopen %s", [url UTF8String]);
             self.callbacks.on_command_submit(cmd, self.callbacks.ctx);
         }
+    } else if ([type isEqualToString:@"hint-yank"]) {
+        NSString *url = body[@"url"];
+        if (url) {
+            [[NSPasteboard generalPasteboard] clearContents];
+            [[NSPasteboard generalPasteboard] setString:url forType:NSPasteboardTypeString];
+            if (self.ui) {
+                ui_set_status_message(self.ui, "Yanked link URL");
+            }
+        }
     } else if ([type isEqualToString:@"hints-done"] || [type isEqualToString:@"hints-cancelled"]) {
         if (self.callbacks.on_hints_done) {
             self.callbacks.on_hints_done(self.callbacks.ctx);
@@ -98,6 +111,7 @@ typedef struct UITab {
     WKWebView *webview;
     SwimNavDelegate *navDelegate;
     int tab_id;
+    bool private_tab;
     char title[256];  // cached title for tab bar display
 } UITab;
 
@@ -142,6 +156,14 @@ struct SwimUI {
 
     NSLayoutConstraint *cmdBarHeight;
     NSLayoutConstraint *findBarHeight;
+    NSLayoutConstraint *tabBarHeight;      // zero-height (for hiding)
+    NSLayoutConstraint *tabBarNormalHeight; // 28pt (for showing)
+    NSLayoutConstraint *statusBarHeight;
+    NSView *tabSeparator;
+
+    int tab_bar_mode;     // 0=always, 1=never, 2=auto
+    int status_bar_mode;  // 0=always, 1=never, 2=auto
+    int status_bar_gen;   // generation counter for auto-hide timeout
 
     WKContentRuleList *blockRuleList;
     bool adblock_enabled;
@@ -154,6 +176,26 @@ struct SwimUI {
 
 static NSColor *tc(ThemeColor c) {
     return [NSColor colorWithSRGBRed:c.r green:c.g blue:c.b alpha:1];
+}
+
+static NSString *normalize_url(NSString *urlStr) {
+    if (![urlStr hasPrefix:@"http://"] && ![urlStr hasPrefix:@"https://"] && ![urlStr hasPrefix:@"about:"]) {
+        return [@"https://" stringByAppendingString:urlStr];
+    }
+    return urlStr;
+}
+
+// 0=always, 1=never, 2=auto
+static int parse_bar_mode(const char *mode) {
+    if (strcmp(mode, "never") == 0) return 1;
+    if (strcmp(mode, "auto") == 0) return 2;
+    return 0;
+}
+
+static bool is_blocked_scheme(const char *url) {
+    return strncasecmp(url, "javascript:", 11) == 0 ||
+           strncasecmp(url, "data:", 5) == 0 ||
+           strncasecmp(url, "file:", 5) == 0;
 }
 
 static NSColor *color_for_mode(SwimUI *ui, Mode mode) {
@@ -237,12 +279,13 @@ static SwimTabBarHandler *sTabBarHandler;
         return YES;
     }
     if (commandSelector == @selector(insertTab:)) {
-        // Tab completion — only in raw command mode (no prefix)
-        if (!self.ui->cmd_prefix[0] && self.callbacks.on_command_complete) {
+        if (self.callbacks.on_command_complete) {
             NSTextField *field = (NSTextField *)control;
             const char *text = [field.stringValue UTF8String];
-            if (text && text[0]) {
-                const char *completed = self.callbacks.on_command_complete(text, self.callbacks.ctx);
+            if (text) {
+                const char *cmd_pfx = self.ui ? self.ui->cmd_prefix : "";
+                const char *completed = self.callbacks.on_command_complete(
+                    text, cmd_pfx, self.callbacks.ctx);
                 if (completed) {
                     field.stringValue = [NSString stringWithUTF8String:completed];
                     NSText *editor = [self.ui->window fieldEditor:YES forObject:field];
@@ -289,6 +332,10 @@ static SwimTabBarHandler *sTabBarHandler;
         self.callbacks.on_load_changed(false, 1.0, self.tabId, self.callbacks.ctx);
     }
     NSLog(@"swim: nav error: %@", error.localizedDescription);
+    if (self.ui) {
+        NSString *msg = [NSString stringWithFormat:@"Error: %@", error.localizedDescription];
+        ui_set_status_message(self.ui, [msg UTF8String]);
+    }
 }
 
 // KVO for estimatedProgress
@@ -362,10 +409,20 @@ static SwimTabBarHandler *sTabBarHandler;
             windowFeatures:(WKWindowFeatures *)windowFeatures {
     (void)configuration; (void)windowFeatures;
     // Handle target="_blank" and window.open() — open in new tab
+    // Inherit private state from the source tab
     NSURL *url = navigationAction.request.URL;
     if (url && self.ui->callbacks.on_command_submit) {
+        bool source_private = false;
+        for (int i = 0; i < self.ui->tab_count; i++) {
+            if (self.ui->tabs[i].webview == webView) {
+                source_private = self.ui->tabs[i].private_tab;
+                break;
+            }
+        }
         char cmd[4096];
-        snprintf(cmd, sizeof(cmd), "tabopen %s", [url.absoluteString UTF8String]);
+        snprintf(cmd, sizeof(cmd), "%s %s",
+                 source_private ? "private" : "tabopen",
+                 [url.absoluteString UTF8String]);
         self.ui->callbacks.on_command_submit(cmd, self.ui->callbacks.ctx);
     }
     return nil;
@@ -468,7 +525,8 @@ static SwimTabBarHandler *sTabBarHandler;
     (void)download; (void)resumeData;
     NSLog(@"swim: download failed: %@", error.localizedDescription);
     if (self.ui) {
-        ui_set_status_message(self.ui, "Download failed");
+        NSString *msg = [NSString stringWithFormat:@"Download failed: %@", error.localizedDescription];
+        ui_set_status_message(self.ui, [msg UTF8String]);
     }
 }
 
@@ -514,7 +572,9 @@ static void rebuild_tab_bar(SwimUI *ui) {
             title = [[title substringToIndex:18] stringByAppendingString:@".."];
         }
 
-        NSString *label = [NSString stringWithFormat:@" %d %@ ", i + 1, title];
+        NSString *label = t->private_tab
+            ? [NSString stringWithFormat:@" %d \xF0\x9F\x94\x92%@ ", i + 1, title]
+            : [NSString stringWithFormat:@" %d %@ ", i + 1, title];
 
         SwimTabButton *btn = [SwimTabButton buttonWithTitle:label
             target:sTabBarHandler action:@selector(tabButtonClicked:)];
@@ -527,7 +587,7 @@ static void rebuild_tab_bar(SwimUI *ui) {
         btn.layer.masksToBounds = YES;
 
         if (i == ui->active_tab) {
-            btn.contentTintColor = ui->theme ? tc(ui->theme->fg) : [NSColor colorWithSRGBRed:0.90 green:0.90 blue:0.90 alpha:1];
+            btn.contentTintColor = tc(ui->theme->fg);
             btn.layer.backgroundColor = [NSColor clearColor].CGColor;
             CALayer *border = [CALayer layer];
             border.frame = CGRectMake(0, 0, 2000, 2);
@@ -535,7 +595,7 @@ static void rebuild_tab_bar(SwimUI *ui) {
             border.name = @"tabBorder";
             [btn.layer addSublayer:border];
         } else {
-            btn.contentTintColor = ui->theme ? tc(ui->theme->fg_dim) : [NSColor colorWithSRGBRed:0.45 green:0.45 blue:0.45 alpha:1];
+            btn.contentTintColor = tc(ui->theme->fg_dim);
             btn.layer.backgroundColor = [NSColor clearColor].CGColor;
         }
 
@@ -545,6 +605,16 @@ static void rebuild_tab_bar(SwimUI *ui) {
         [btn.heightAnchor constraintEqualToConstant:28].active = YES;
         [ui->tabBar addArrangedSubview:btn];
     }
+
+    // Tab bar visibility based on mode
+    bool show;
+    if (ui->tab_bar_mode == 1) show = false;       // never
+    else if (ui->tab_bar_mode == 2) show = (ui->tab_count > 1); // auto
+    else show = true;                                // always
+    ui->tabBarScroll.hidden = !show;
+    ui->tabSeparator.hidden = !show;
+    ui->tabBarNormalHeight.active = show;
+    ui->tabBarHeight.active = !show;
 }
 
 // --- Tab Bar Click Handler ---
@@ -573,7 +643,7 @@ static NSString *const kHintsJS =
     "    if(r.width>0&&r.height>0&&r.top<innerHeight&&r.bottom>0&&r.left<innerWidth&&r.right>0)"
     "      v.push({el:els[i],r:r})}"
     "  return v}"
-    "function show(nt){"
+    "function show(mode){"
     "  rm();var cl=find();if(!cl.length)return;"
     "  var lb=labels(cl.length);"
     "  box=document.createElement('div');box.id='__sh';"
@@ -586,7 +656,7 @@ static NSString *const kHintsJS =
     "pointer-events:none;line-height:1.2;';"
     "    o.style.left=cl[i].r.left+'px';o.style.top=cl[i].r.top+'px';"
     "    box.appendChild(o);"
-    "    hints.push({el:cl[i].el,label:lb[i],ov:o,nt:!!nt})}}"
+    "    hints.push({el:cl[i].el,label:lb[i],ov:o,mode:mode})}}"
     "function filter(typed){"
     "  var rem=0,last=null;"
     "  for(var i=0;i<hints.length;i++){"
@@ -598,8 +668,10 @@ static NSString *const kHintsJS =
     "  else if(rem===0){rm();window.webkit.messageHandlers.swim.postMessage({type:'hints-cancelled'})}}"
     "function activate(h){"
     "  rm();"
-    "  if(h.nt){"
-    "    var href=h.el.href||(h.el.closest&&h.el.closest('a[href]')&&h.el.closest('a[href]').href);"
+    "  var href=h.el.href||(h.el.closest&&h.el.closest('a[href]')&&h.el.closest('a[href]').href);"
+    "  if(h.mode===2){"
+    "    if(href)window.webkit.messageHandlers.swim.postMessage({type:'hint-yank',url:href})"
+    "  }else if(h.mode===1){"
     "    if(href)window.webkit.messageHandlers.swim.postMessage({type:'hint-activate',url:href,newTab:true})"
     "  }else{"
     "    h.el.click();"
@@ -613,9 +685,13 @@ static NSString *const kHintsJS =
 
 // --- WebView Factory ---
 
-static WKWebView *create_webview(SwimUI *ui, int tab_id, SwimNavDelegate **out_nav) {
+static WKWebView *create_webview(SwimUI *ui, int tab_id, bool private_tab, SwimNavDelegate **out_nav) {
     WKWebViewConfiguration *config = [[WKWebViewConfiguration alloc] init];
-    config.preferences.elementFullscreenEnabled = YES;
+    config.preferences.elementFullscreenEnabled = NO;
+    [config.preferences setValue:@NO forKey:@"javaScriptCanAccessClipboard"];
+    if (private_tab) {
+        config.websiteDataStore = [WKWebsiteDataStore nonPersistentDataStore];
+    }
     [config.userContentController addScriptMessageHandler:ui->scriptHandler name:@"swim"];
 
     // Focus detection
@@ -659,9 +735,15 @@ static WKWebView *create_webview(SwimUI *ui, int tab_id, SwimNavDelegate **out_n
     wv.customUserAgent = kUserAgent;
     wv.allowsBackForwardNavigationGestures = YES;
 
+    // Inherit dark mode appearance from window
+    if (ui->window.appearance) {
+        wv.appearance = ui->window.appearance;
+    }
+
     SwimNavDelegate *nav = [[SwimNavDelegate alloc] init];
     nav.callbacks = ui->callbacks;
     nav.tabId = tab_id;
+    nav.ui = ui;
     nav.downloadDelegate = ui->downloadDelegate;
     wv.navigationDelegate = nav;
     wv.UIDelegate = ui->uiDelegate;
@@ -691,6 +773,21 @@ static void show_webview(SwimUI *ui, int index) {
     }
 }
 
+// Auto-show status bar then schedule hide after timeout
+static void status_bar_flash(SwimUI *ui) {
+    if (ui->status_bar_mode != 2) return; // only for auto mode
+    ui->statusBar.hidden = NO;
+    ui->statusBarHeight.active = NO;
+    int gen = ++ui->status_bar_gen;
+    dispatch_after(dispatch_time(DISPATCH_TIME_NOW, (int64_t)(3 * NSEC_PER_SEC)),
+        dispatch_get_main_queue(), ^{
+            if (ui->status_bar_gen == gen && ui->status_bar_mode == 2) {
+                ui->statusBar.hidden = YES;
+                ui->statusBarHeight.active = YES;
+            }
+        });
+}
+
 static void tab_bar_clicked(SwimUI *ui, int index) {
     if (ui->callbacks.on_tab_selected) {
         ui->callbacks.on_tab_selected(index, ui->callbacks.ctx);
@@ -699,11 +796,13 @@ static void tab_bar_clicked(SwimUI *ui, int index) {
 
 // --- Public API ---
 
-SwimUI *ui_create(UICallbacks callbacks, bool compact_titlebar, SwimTheme *theme) {
+SwimUI *ui_create(UICallbacks callbacks, bool compact_titlebar, const char *tab_bar_mode, const char *status_bar_mode, SwimTheme *theme) {
     SwimUI *ui = calloc(1, sizeof(SwimUI));
     ui->callbacks = callbacks;
     ui->active_tab = -1;
     ui->theme = theme;
+    ui->tab_bar_mode = parse_bar_mode(tab_bar_mode);
+    ui->status_bar_mode = parse_bar_mode(status_bar_mode);
 
     // Window
     NSRect frame = NSMakeRect(200, 200, 1024, 768);
@@ -715,7 +814,7 @@ SwimUI *ui_create(UICallbacks callbacks, bool compact_titlebar, SwimTheme *theme
                                                backing:NSBackingStoreBuffered
                                                  defer:NO];
     ui->window.title = @"swim";
-    ui->window.backgroundColor = ui->theme ? tc(ui->theme->bg) : [NSColor colorWithSRGBRed:0.12 green:0.12 blue:0.14 alpha:1];
+    ui->window.backgroundColor = tc(ui->theme->bg);
     if (compact_titlebar) {
         ui->window.titlebarAppearsTransparent = YES;
         ui->window.titleVisibility = NSWindowTitleHidden;
@@ -724,6 +823,7 @@ SwimUI *ui_create(UICallbacks callbacks, bool compact_titlebar, SwimTheme *theme
     // Script handler (shared across all tabs)
     ui->scriptHandler = [[SwimScriptHandler alloc] init];
     ui->scriptHandler.callbacks = callbacks;
+    ui->scriptHandler.ui = ui;
 
     // UI delegate (JS alerts, target=_blank, file uploads)
     ui->uiDelegate = [[SwimUIDelegate alloc] init];
@@ -750,10 +850,9 @@ SwimUI *ui_create(UICallbacks callbacks, bool compact_titlebar, SwimTheme *theme
     ui->tabBarScroll.hasVerticalScroller = NO;
     ui->tabBarScroll.translatesAutoresizingMaskIntoConstraints = NO;
     ui->tabBarScroll.drawsBackground = YES;
-    ui->tabBarScroll.backgroundColor = ui->theme ? tc(ui->theme->bg) : [NSColor colorWithSRGBRed:0.12 green:0.12 blue:0.14 alpha:1];
-    [NSLayoutConstraint activateConstraints:@[
-        [ui->tabBarScroll.heightAnchor constraintEqualToConstant:28],
-    ]];
+    ui->tabBarScroll.backgroundColor = tc(ui->theme->bg);
+    ui->tabBarNormalHeight = [ui->tabBarScroll.heightAnchor constraintEqualToConstant:28];
+    ui->tabBarNormalHeight.active = YES;
 
     // WebView container (plain NSView, webviews get added/removed as children)
     ui->webviewContainer = [[NSView alloc] init];
@@ -762,7 +861,7 @@ SwimUI *ui_create(UICallbacks callbacks, bool compact_titlebar, SwimTheme *theme
     // Status bar
     ui->modeLabel = make_label(@" NORMAL ");
     ui->modeLabel.font = [NSFont monospacedSystemFontOfSize:11 weight:NSFontWeightBold];
-    ui->modeLabel.textColor = ui->theme ? tc(ui->theme->bg) : [NSColor colorWithSRGBRed:0.08 green:0.08 blue:0.10 alpha:1];
+    ui->modeLabel.textColor = tc(ui->theme->bg);
     ui->modeLabel.backgroundColor = color_for_mode(ui, MODE_NORMAL);
     ui->modeLabel.drawsBackground = YES;
     ui->modeLabel.wantsLayer = YES;
@@ -772,21 +871,21 @@ SwimUI *ui_create(UICallbacks callbacks, bool compact_titlebar, SwimTheme *theme
                               forOrientation:NSLayoutConstraintOrientationHorizontal];
 
     ui->urlLabel = make_label(@"");
-    ui->urlLabel.textColor = ui->theme ? tc(ui->theme->fg) : [NSColor colorWithSRGBRed:0.67 green:0.67 blue:0.67 alpha:1];
+    ui->urlLabel.textColor = tc(ui->theme->fg);
     ui->urlLabel.lineBreakMode = NSLineBreakByTruncatingMiddle;
     [ui->urlLabel setContentCompressionResistancePriority:NSLayoutPriorityDefaultLow
                                           forOrientation:NSLayoutConstraintOrientationHorizontal];
 
     ui->progressLabel = make_label(@"");
     ui->progressLabel.font = [NSFont monospacedSystemFontOfSize:11 weight:NSFontWeightRegular];
-    ui->progressLabel.textColor = ui->theme ? tc(ui->theme->accent) : [NSColor colorWithSRGBRed:0.5 green:0.7 blue:0.9 alpha:1];
+    ui->progressLabel.textColor = tc(ui->theme->accent);
     [ui->progressLabel setContentHuggingPriority:NSLayoutPriorityRequired
                                   forOrientation:NSLayoutConstraintOrientationHorizontal];
 
     ui->pendingLabel = make_label(@"");
     ui->pendingLabel.font = [NSFont monospacedSystemFontOfSize:11 weight:NSFontWeightBold];
-    ui->pendingLabel.textColor = ui->theme ? tc(ui->theme->bg) : [NSColor colorWithSRGBRed:0.08 green:0.08 blue:0.10 alpha:1];
-    ui->pendingLabel.backgroundColor = ui->theme ? tc(ui->theme->command) : [NSColor colorWithSRGBRed:0.80 green:0.75 blue:0.45 alpha:1];
+    ui->pendingLabel.textColor = tc(ui->theme->bg);
+    ui->pendingLabel.backgroundColor = tc(ui->theme->command);
     ui->pendingLabel.drawsBackground = YES;
     ui->pendingLabel.wantsLayer = YES;
     ui->pendingLabel.layer.cornerRadius = 3;
@@ -800,7 +899,7 @@ SwimUI *ui_create(UICallbacks callbacks, bool compact_titlebar, SwimTheme *theme
     ui->statusBar.edgeInsets = NSEdgeInsetsMake(4, 6, 4, 6);
     ui->statusBar.translatesAutoresizingMaskIntoConstraints = NO;
     ui->statusBar.wantsLayer = YES;
-    ui->statusBar.layer.backgroundColor = (ui->theme ? tc(ui->theme->status_bg) : [NSColor colorWithSRGBRed:0.13 green:0.13 blue:0.15 alpha:1]).CGColor;
+    ui->statusBar.layer.backgroundColor = (tc(ui->theme->status_bg)).CGColor;
 
     // Command bar (hidden by default)
     ui->commandBar = [[NSTextField alloc] init];
@@ -817,14 +916,14 @@ SwimUI *ui_create(UICallbacks callbacks, bool compact_titlebar, SwimTheme *theme
     // Command bar container with ":" prefix
     ui->colonLabel = make_label(@":");
     ui->colonLabel.font = [NSFont monospacedSystemFontOfSize:12 weight:NSFontWeightBold];
-    ui->colonLabel.textColor = ui->theme ? tc(ui->theme->command) : [NSColor colorWithSRGBRed:0.82 green:0.75 blue:0.40 alpha:1];
+    ui->colonLabel.textColor = tc(ui->theme->command);
     ui->commandBarContainer = [NSStackView stackViewWithViews:@[ui->colonLabel, ui->commandBar]];
     ui->commandBarContainer.orientation = NSUserInterfaceLayoutOrientationHorizontal;
     ui->commandBarContainer.spacing = 2;
     ui->commandBarContainer.edgeInsets = NSEdgeInsetsMake(2, 6, 2, 6);
     ui->commandBarContainer.translatesAutoresizingMaskIntoConstraints = NO;
     ui->commandBarContainer.wantsLayer = YES;
-    ui->commandBarContainer.layer.backgroundColor = (ui->theme ? tc(ui->theme->status_bg) : [NSColor colorWithSRGBRed:0.10 green:0.10 blue:0.12 alpha:1]).CGColor;
+    ui->commandBarContainer.layer.backgroundColor = (tc(ui->theme->status_bg)).CGColor;
     ui->commandBarContainer.hidden = YES;
 
     // Find bar (hidden by default)
@@ -840,7 +939,7 @@ SwimUI *ui_create(UICallbacks callbacks, bool compact_titlebar, SwimTheme *theme
 
     // Find bar container with "/" prefix
     NSTextField *slashLabel = make_label(@"/");
-    slashLabel.textColor = ui->theme ? tc(ui->theme->fg_dim) : [NSColor colorWithSRGBRed:0.7 green:0.7 blue:0.7 alpha:1];
+    slashLabel.textColor = tc(ui->theme->fg_dim);
     ui->findBarContainer = [NSStackView stackViewWithViews:@[slashLabel, ui->findBar]];
     ui->findBarContainer.orientation = NSUserInterfaceLayoutOrientationHorizontal;
     ui->findBarContainer.spacing = 2;
@@ -852,13 +951,13 @@ SwimUI *ui_create(UICallbacks callbacks, bool compact_titlebar, SwimTheme *theme
     ui->rootView.translatesAutoresizingMaskIntoConstraints = NO;
 
     // Separator between tab bar and webview
-    NSView *tabSeparator = [[NSView alloc] init];
-    tabSeparator.translatesAutoresizingMaskIntoConstraints = NO;
-    tabSeparator.wantsLayer = YES;
-    tabSeparator.layer.backgroundColor = (ui->theme ? tc(ui->theme->status_bg) : [NSColor colorWithSRGBRed:0.22 green:0.22 blue:0.25 alpha:1]).CGColor;
+    ui->tabSeparator = [[NSView alloc] init];
+    ui->tabSeparator.translatesAutoresizingMaskIntoConstraints = NO;
+    ui->tabSeparator.wantsLayer = YES;
+    ui->tabSeparator.layer.backgroundColor = (tc(ui->theme->status_bg)).CGColor;
 
     [ui->rootView addSubview:ui->tabBarScroll];
-    [ui->rootView addSubview:tabSeparator];
+    [ui->rootView addSubview:ui->tabSeparator];
     [ui->rootView addSubview:ui->webviewContainer];
     [ui->rootView addSubview:ui->statusBar];
     [ui->rootView addSubview:ui->findBarContainer];
@@ -875,13 +974,13 @@ SwimUI *ui_create(UICallbacks callbacks, bool compact_titlebar, SwimTheme *theme
         [ui->tabBarScroll.trailingAnchor constraintEqualToAnchor:ui->rootView.trailingAnchor],
 
         // Separator
-        [tabSeparator.topAnchor constraintEqualToAnchor:ui->tabBarScroll.bottomAnchor],
-        [tabSeparator.leadingAnchor constraintEqualToAnchor:ui->rootView.leadingAnchor],
-        [tabSeparator.trailingAnchor constraintEqualToAnchor:ui->rootView.trailingAnchor],
-        [tabSeparator.heightAnchor constraintEqualToConstant:1],
+        [ui->tabSeparator.topAnchor constraintEqualToAnchor:ui->tabBarScroll.bottomAnchor],
+        [ui->tabSeparator.leadingAnchor constraintEqualToAnchor:ui->rootView.leadingAnchor],
+        [ui->tabSeparator.trailingAnchor constraintEqualToAnchor:ui->rootView.trailingAnchor],
+        [ui->tabSeparator.heightAnchor constraintEqualToConstant:1],
 
         // WebView container fills middle
-        [ui->webviewContainer.topAnchor constraintEqualToAnchor:tabSeparator.bottomAnchor],
+        [ui->webviewContainer.topAnchor constraintEqualToAnchor:ui->tabSeparator.bottomAnchor],
         [ui->webviewContainer.leadingAnchor constraintEqualToAnchor:ui->rootView.leadingAnchor],
         [ui->webviewContainer.trailingAnchor constraintEqualToAnchor:ui->rootView.trailingAnchor],
 
@@ -910,8 +1009,19 @@ SwimUI *ui_create(UICallbacks callbacks, bool compact_titlebar, SwimTheme *theme
     // Zero-height constraints for hidden bars (prevents bottom buffer)
     ui->cmdBarHeight = [ui->commandBarContainer.heightAnchor constraintEqualToConstant:0];
     ui->findBarHeight = [ui->findBarContainer.heightAnchor constraintEqualToConstant:0];
+    ui->tabBarHeight = [ui->tabBarScroll.heightAnchor constraintEqualToConstant:0];
+    ui->statusBarHeight = [ui->statusBar.heightAnchor constraintEqualToConstant:0];
     ui->cmdBarHeight.active = YES;
     ui->findBarHeight.active = YES;
+
+    // Status bar visibility based on mode
+    if (ui->status_bar_mode == 1) { // never
+        ui->statusBar.hidden = YES;
+        ui->statusBarHeight.active = YES;
+    } else if (ui->status_bar_mode == 2) { // auto — start hidden
+        ui->statusBar.hidden = YES;
+        ui->statusBarHeight.active = YES;
+    }
 
     [ui->window center];
     [ui->window makeKeyAndOrderFront:nil];
@@ -929,16 +1039,17 @@ SwimUI *ui_create(UICallbacks callbacks, bool compact_titlebar, SwimTheme *theme
     return ui;
 }
 
-int ui_add_tab(SwimUI *ui, const char *url, int tab_id) {
+int ui_add_tab(SwimUI *ui, const char *url, int tab_id, bool private_tab) {
     if (ui->tab_count >= MAX_TABS) return -1;
 
     SwimNavDelegate *nav = nil;
-    WKWebView *wv = create_webview(ui, tab_id, &nav);
+    WKWebView *wv = create_webview(ui, tab_id, private_tab, &nav);
 
     UITab *t = &ui->tabs[ui->tab_count];
     t->webview = wv;
     t->navDelegate = nav;
     t->tab_id = tab_id;
+    t->private_tab = private_tab;
 
     ui->tab_count++;
 
@@ -1038,14 +1149,21 @@ void ui_move_tab(SwimUI *ui, int from, int to) {
     rebuild_tab_bar(ui);
 }
 
-void ui_navigate(SwimUI *ui, const char *url) {
-    if (ui->active_tab < 0) return;
-    WKWebView *wv = ui->tabs[ui->active_tab].webview;
-
-    NSString *urlStr = [NSString stringWithUTF8String:url];
-    if (![urlStr hasPrefix:@"http://"] && ![urlStr hasPrefix:@"https://"] && ![urlStr hasPrefix:@"about:"]) {
-        urlStr = [@"https://" stringByAppendingString:urlStr];
+bool ui_tab_is_private(SwimUI *ui, int tab_id) {
+    for (int i = 0; i < ui->tab_count; i++) {
+        if (ui->tabs[i].tab_id == tab_id) return ui->tabs[i].private_tab;
     }
+    return false;
+}
+
+void ui_navigate(SwimUI *ui, const char *url) {
+    if (ui->active_tab < 0 || !url) return;
+
+    // Block dangerous URL schemes at the navigation layer
+    if (is_blocked_scheme(url)) return;
+
+    WKWebView *wv = ui->tabs[ui->active_tab].webview;
+    NSString *urlStr = normalize_url([NSString stringWithUTF8String:url]);
     NSURL *nsurl = [NSURL URLWithString:urlStr];
     if (nsurl) {
         [wv loadRequest:[NSURLRequest requestWithURL:nsurl]];
@@ -1077,15 +1195,18 @@ void ui_go_forward(SwimUI *ui) {
 void ui_set_mode(SwimUI *ui, Mode mode) {
     ui->modeLabel.stringValue = [NSString stringWithFormat:@" %s ", mode_name(mode)];
     ui->modeLabel.backgroundColor = color_for_mode(ui, mode);
+    status_bar_flash(ui);
 }
 
 void ui_set_url(SwimUI *ui, const char *url) {
     ui->urlLabel.stringValue = [NSString stringWithUTF8String:url];
+    status_bar_flash(ui);
 }
 
 void ui_set_progress(SwimUI *ui, double progress) {
     if (progress < 1.0) {
         ui->progressLabel.stringValue = [NSString stringWithFormat:@"[%d%%]", (int)(progress * 100)];
+        status_bar_flash(ui);
     } else {
         ui->progressLabel.stringValue = @"";
     }
@@ -1137,16 +1258,29 @@ void ui_hide_command_bar(SwimUI *ui) {
 
 // --- Hint Mode ---
 
-void ui_show_hints(SwimUI *ui, bool new_tab) {
+void ui_show_hints(SwimUI *ui, int mode) {
     if (ui->active_tab < 0) return;
-    NSString *js = [NSString stringWithFormat:@"window.__swim_hints.show(%@)",
-        new_tab ? @"true" : @"false"];
+    NSString *js = [NSString stringWithFormat:@"window.__swim_hints.show(%d)", mode];
     [ui->tabs[ui->active_tab].webview evaluateJavaScript:js completionHandler:nil];
+}
+
+// Escape a string for safe embedding in a JS single-quoted string literal
+static NSString *js_escape_string(NSString *s) {
+    NSString *escaped = [s stringByReplacingOccurrencesOfString:@"\\" withString:@"\\\\"];
+    escaped = [escaped stringByReplacingOccurrencesOfString:@"'" withString:@"\\'"];
+    escaped = [escaped stringByReplacingOccurrencesOfString:@"\n" withString:@"\\n"];
+    escaped = [escaped stringByReplacingOccurrencesOfString:@"\r" withString:@"\\r"];
+    // Unicode line/paragraph separators (JS treats these as newlines)
+    escaped = [escaped stringByReplacingOccurrencesOfString:@"\u2028" withString:@"\\u2028"];
+    escaped = [escaped stringByReplacingOccurrencesOfString:@"\u2029" withString:@"\\u2029"];
+    return escaped;
 }
 
 void ui_filter_hints(SwimUI *ui, const char *typed) {
     if (ui->active_tab < 0 || !typed) return;
-    NSString *js = [NSString stringWithFormat:@"window.__swim_hints.filter('%s')", typed];
+    NSString *query = [NSString stringWithUTF8String:typed];
+    NSString *escaped = js_escape_string(query);
+    NSString *js = [NSString stringWithFormat:@"window.__swim_hints.filter('%@')", escaped];
     [ui->tabs[ui->active_tab].webview evaluateJavaScript:js completionHandler:nil];
 }
 
@@ -1178,25 +1312,16 @@ void ui_hide_find_bar(SwimUI *ui) {
     }
 }
 
-void ui_find_next(SwimUI *ui) {
+static void find_in_page(SwimUI *ui, bool backwards) {
     if (ui->active_tab < 0 || !ui->find_query[0]) return;
-    NSString *query = [NSString stringWithUTF8String:ui->find_query];
-    NSString *escaped = [query stringByReplacingOccurrencesOfString:@"\\" withString:@"\\\\"];
-    escaped = [escaped stringByReplacingOccurrencesOfString:@"'" withString:@"\\'"];
+    NSString *escaped = js_escape_string([NSString stringWithUTF8String:ui->find_query]);
     NSString *js = [NSString stringWithFormat:
-        @"window.find('%@', false, false, true)", escaped];
+        @"window.find('%@', false, %@, true)", escaped, backwards ? @"true" : @"false"];
     [ui->tabs[ui->active_tab].webview evaluateJavaScript:js completionHandler:nil];
 }
 
-void ui_find_prev(SwimUI *ui) {
-    if (ui->active_tab < 0 || !ui->find_query[0]) return;
-    NSString *query = [NSString stringWithUTF8String:ui->find_query];
-    NSString *escaped = [query stringByReplacingOccurrencesOfString:@"\\" withString:@"\\\\"];
-    escaped = [escaped stringByReplacingOccurrencesOfString:@"'" withString:@"\\'"];
-    NSString *js = [NSString stringWithFormat:
-        @"window.find('%@', false, true, true)", escaped];
-    [ui->tabs[ui->active_tab].webview evaluateJavaScript:js completionHandler:nil];
-}
+void ui_find_next(SwimUI *ui) { find_in_page(ui, false); }
+void ui_find_prev(SwimUI *ui) { find_in_page(ui, true); }
 
 // --- Content Blocking ---
 
@@ -1252,6 +1377,7 @@ void ui_set_pending_keys(SwimUI *ui, const char *keys) {
     if (keys && keys[0]) {
         ui->pendingLabel.stringValue = [NSString stringWithFormat:@" %s ", keys];
         ui->pendingLabel.drawsBackground = YES;
+        status_bar_flash(ui);
     } else {
         ui->pendingLabel.stringValue = @"";
         ui->pendingLabel.drawsBackground = NO;
@@ -1259,6 +1385,7 @@ void ui_set_pending_keys(SwimUI *ui, const char *keys) {
 }
 
 void ui_set_status_message(SwimUI *ui, const char *msg) {
+    status_bar_flash(ui);
     // Only save the real URL on the first message (gen was 0)
     if (ui->status_msg_gen == 0) {
         snprintf(ui->saved_url, sizeof(ui->saved_url), "%s",
@@ -1272,7 +1399,7 @@ void ui_set_status_message(SwimUI *ui, const char *msg) {
             if (ui->status_msg_gen == gen) {
                 ui->status_msg_gen = 0;
                 ui->urlLabel.stringValue = [NSString stringWithUTF8String:ui->saved_url];
-                ui->urlLabel.textColor = ui->theme ? tc(ui->theme->fg) : [NSColor colorWithSRGBRed:0.67 green:0.67 blue:0.67 alpha:1];
+                ui->urlLabel.textColor = tc(ui->theme->fg);
             }
         });
 }
@@ -1303,8 +1430,115 @@ void ui_set_window_title(SwimUI *ui, const char *title) {
     }
 }
 
+void ui_set_tab_bar_mode(SwimUI *ui, const char *mode) {
+    ui->tab_bar_mode = parse_bar_mode(mode);
+    rebuild_tab_bar(ui);
+}
+
+void ui_set_status_bar_mode(SwimUI *ui, const char *mode) {
+    ui->status_bar_mode = parse_bar_mode(mode);
+
+    if (ui->status_bar_mode == 0) { // always — show immediately
+        ui->statusBar.hidden = NO;
+        ui->statusBarHeight.active = NO;
+    } else if (ui->status_bar_mode == 1) { // never — hide immediately
+        ui->statusBar.hidden = YES;
+        ui->statusBarHeight.active = YES;
+    } else { // auto — hide, will flash on next event
+        ui->statusBar.hidden = YES;
+        ui->statusBarHeight.active = YES;
+    }
+}
+
 void ui_set_userscripts(SwimUI *ui, UserScriptManager *scripts) {
     ui->userscripts = scripts;
+}
+
+// --- Private API declarations for mute and inspector ---
+
+@interface WKWebView (SwimPrivate)
+- (void)_setPageMuted:(NSUInteger)state;
+- (BOOL)_isPlayingAudio;
+- (id)_inspector;
+@end
+
+@interface NSObject (SwimInspector)
+- (void)show;
+@end
+
+void ui_set_dark_mode(SwimUI *ui, bool enabled) {
+    NSAppearance *appearance = enabled
+        ? [NSAppearance appearanceNamed:NSAppearanceNameDarkAqua]
+        : [NSAppearance appearanceNamed:NSAppearanceNameAqua];
+    for (int i = 0; i < ui->tab_count; i++) {
+        ui->tabs[i].webview.appearance = appearance;
+    }
+    // Store for new tabs
+    ui->window.appearance = appearance;
+}
+
+void ui_toggle_mute(SwimUI *ui) {
+    if (ui->active_tab < 0) return;
+    WKWebView *wv = ui->tabs[ui->active_tab].webview;
+    if ([wv respondsToSelector:@selector(_setPageMuted:)]) {
+        // Toggle: 0=unmuted, 1=audio muted
+        static bool muted = false;
+        muted = !muted;
+        [wv _setPageMuted:muted ? 1 : 0];
+        ui_set_status_message(ui, muted ? "Tab muted" : "Tab unmuted");
+    } else {
+        ui_set_status_message(ui, "Mute not available");
+    }
+}
+
+void ui_open_inspector(SwimUI *ui) {
+    if (ui->active_tab < 0) return;
+    WKWebView *wv = ui->tabs[ui->active_tab].webview;
+    if ([wv respondsToSelector:@selector(_inspector)]) {
+        id inspector = [wv _inspector];
+        if ([inspector respondsToSelector:@selector(show)]) {
+            [inspector show];
+        }
+    } else {
+        ui_set_status_message(ui, "Inspector not available");
+    }
+}
+
+void ui_set_proxy(SwimUI *ui, const char *type, const char *host, int port) {
+    (void)ui;
+    // Proxy applies to the default data store for future navigations
+    if (!type || strcmp(type, "none") == 0 || !host || !host[0]) {
+        // Clear proxy — use default data store without proxy config
+        WKWebsiteDataStore *store = [WKWebsiteDataStore defaultDataStore];
+        if ([store respondsToSelector:@selector(setProxyConfigurations:)]) {
+            [store setProxyConfigurations:@[]];
+        }
+        ui_set_status_message(ui, "Proxy disabled");
+        return;
+    }
+
+    if (@available(macOS 14.0, *)) {
+        char port_str[8];
+        snprintf(port_str, sizeof(port_str), "%d", port);
+        nw_endpoint_t endpoint = nw_endpoint_create_host(host, port_str);
+
+        nw_proxy_config_t proxy = NULL;
+        if (strcmp(type, "http") == 0 || strcmp(type, "https") == 0) {
+            proxy = nw_proxy_config_create_http_connect(endpoint, NULL);
+        } else if (strcmp(type, "socks5") == 0) {
+            proxy = nw_proxy_config_create_socksv5(endpoint);
+        }
+
+        if (proxy) {
+            WKWebsiteDataStore *store = [WKWebsiteDataStore defaultDataStore];
+            store.proxyConfigurations = @[proxy];
+            char msg[256];
+            snprintf(msg, sizeof(msg), "Proxy: %s %s:%d", type, host, port);
+            ui_set_status_message(ui, msg);
+        }
+    } else {
+        ui_set_status_message(ui, "Proxy requires macOS 14+");
+    }
 }
 
 void ui_close(SwimUI *ui) {
@@ -1318,7 +1552,6 @@ void ui_close(SwimUI *ui) {
     [NSApp terminate:nil];
 }
 
-#ifdef SWIM_TEST
 void *ui_screenshot(SwimUI *ui) {
     // Capture the full window content (tab bar, status bar, webview, command bar).
     // We composite: render the NSView hierarchy for chrome, then overlay the
@@ -1360,7 +1593,6 @@ void *ui_screenshot(SwimUI *ui) {
     if (webviewImage) {
         NSRect wvFrame = [ui->webviewContainer convertRect:ui->webviewContainer.bounds
                                                     toView:contentView];
-        // Flip Y for bitmap drawing (NSView is flipped in bitmap context)
         NSImage *composite = [[NSImage alloc] initWithSize:bounds.size];
         [composite lockFocus];
 
@@ -1403,4 +1635,3 @@ void *ui_get_active_webview(SwimUI *ui) {
     if (ui->active_tab < 0 || ui->active_tab >= ui->tab_count) return NULL;
     return (__bridge void *)ui->tabs[ui->active_tab].webview;
 }
-#endif

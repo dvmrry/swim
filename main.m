@@ -6,9 +6,8 @@
 #include "storage.h"
 #include "config.h"
 #include "userscript.h"
-#ifdef SWIM_TEST
-#include "test_server.h"
-#endif
+#include "focus.h"
+#include "serve.h"
 
 // --- App State ---
 
@@ -32,9 +31,10 @@ static App app;
 
 // --- Helpers ---
 
-static void theme_hex(ThemeColor c, char *buf) {
-    snprintf(buf, 8, "#%02x%02x%02x",
-        (int)(c.r * 255), (int)(c.g * 255), (int)(c.b * 255));
+static bool is_blocked_scheme(const char *url) {
+    return strncasecmp(url, "javascript:", 11) == 0 ||
+           strncasecmp(url, "data:", 5) == 0 ||
+           strncasecmp(url, "file:", 5) == 0;
 }
 
 static void set_url_with_tls(const char *url) {
@@ -47,21 +47,53 @@ static void set_url_with_tls(const char *url) {
     }
 }
 
+// Expand a search template, replacing %s with the query
+static void expand_search(const char *tmpl, const char *query, char *out, int out_size) {
+    const char *pct = strstr(tmpl, "%s");
+    if (pct) {
+        int prefix_len = (int)(pct - tmpl);
+        snprintf(out, out_size, "%.*s%s%s", prefix_len, tmpl, query, pct + 2);
+    } else {
+        snprintf(out, out_size, "%s%s", tmpl, query);
+    }
+}
+
 static void open_url_in_active_tab(const char *raw) {
     if (!raw || !raw[0]) return;
 
-    // If no dots or slashes, treat as search
+    // Block dangerous URL schemes
+    if (is_blocked_scheme(raw)) {
+        ui_set_status_message(app.ui, "Blocked: unsafe URL scheme");
+        return;
+    }
+
+    // Check for search engine shortcut prefix (e.g., "g foo bar")
+    const char *space = strchr(raw, ' ');
+    if (space) {
+        int prefix_len = (int)(space - raw);
+        for (int i = 0; i < app.config.search_shortcut_count; i++) {
+            if ((int)strlen(app.config.search_shortcuts[i].prefix) == prefix_len &&
+                strncmp(raw, app.config.search_shortcuts[i].prefix, prefix_len) == 0) {
+                char search_url[4096];
+                expand_search(app.config.search_shortcuts[i].url_template,
+                    space + 1, search_url, sizeof(search_url));
+                if (is_blocked_scheme(search_url)) {
+                    ui_set_status_message(app.ui, "Blocked: unsafe URL scheme");
+                    return;
+                }
+                ui_navigate(app.ui, search_url);
+                return;
+            }
+        }
+    }
+
+    // If no dots or slashes, treat as default search
     if (!strchr(raw, '.') && !strchr(raw, '/') && strncmp(raw, "http", 4) != 0) {
         char search_url[4096];
-        // Use config search engine, replace %s with query
-        const char *fmt = app.config.search_engine;
-        char *pct = strstr(fmt, "%s");
-        if (pct) {
-            int prefix_len = (int)(pct - fmt);
-            snprintf(search_url, sizeof(search_url), "%.*s%s%s",
-                prefix_len, fmt, raw, pct + 2);
-        } else {
-            snprintf(search_url, sizeof(search_url), "%s%s", fmt, raw);
+        expand_search(app.config.search_engine, raw, search_url, sizeof(search_url));
+        if (is_blocked_scheme(search_url)) {
+            ui_set_status_message(app.ui, "Blocked: unsafe URL scheme");
+            return;
         }
         ui_navigate(app.ui, search_url);
     } else {
@@ -69,9 +101,9 @@ static void open_url_in_active_tab(const char *raw) {
     }
 }
 
-static void create_tab(const char *url) {
+static void create_tab_ex(const char *url, bool private_tab) {
     int tab_id = browser_add_tab(&app.browser, url ? url : "");
-    ui_add_tab(app.ui, url, tab_id);
+    ui_add_tab(app.ui, url, tab_id, private_tab);
 
     Tab *t = browser_active(&app.browser);
     if (t && t->url[0]) {
@@ -79,6 +111,15 @@ static void create_tab(const char *url) {
     } else {
         ui_set_url(app.ui, "");
     }
+}
+
+static void create_tab(const char *url) {
+    create_tab_ex(url, false);
+}
+
+static void app_set_mode(Mode m) {
+    mode_set(&app.mode, m);
+    ui_set_mode(app.ui, m);
 }
 
 static void sync_tab_display(void) {
@@ -90,65 +131,82 @@ static void sync_tab_display(void) {
     }
 }
 
+static int collect_tab_urls(const char **urls, int max) {
+    int count = 0;
+    for (int i = 0; i < app.browser.tab_count && count < max; i++) {
+        if (app.browser.tabs[i].url[0] &&
+            !ui_tab_is_private(app.ui, app.browser.tabs[i].id))
+            urls[count++] = app.browser.tabs[i].url;
+    }
+    return count;
+}
+
+static void close_tab_at(int index) {
+    bool is_private = ui_tab_is_private(app.ui, app.browser.tabs[index].id);
+    browser_close_tab(&app.browser, index);
+    if (is_private && app.browser.closed_count > 0) {
+        free(app.browser.closed_urls[--app.browser.closed_count]);
+    }
+    ui_close_tab(app.ui, index);
+}
+
+static void switch_to_tab(int index) {
+    browser_set_active(&app.browser, index);
+    ui_select_tab(app.ui, index);
+    Tab *t = browser_active(&app.browser);
+    if (t && t->lazy && t->url[0]) {
+        t->lazy = false;
+        ui_navigate(app.ui, t->url);
+    }
+    sync_tab_display();
+}
+
 // --- Actions (from key bindings) ---
 
 static int get_count(void) {
     return app.mode.count > 0 ? app.mode.count : 1;
 }
 
+// Focus overlay-aware scroll target
+#define SCROLL_TARGET "var e=document.getElementById('swim-focus')||document.scrollingElement;"
+
+static void scroll_js(const char *expr) {
+    char js[256];
+    snprintf(js, sizeof(js), SCROLL_TARGET "%s", expr);
+    ui_run_js(app.ui, js);
+}
+
 static void handle_action(const char *action, void *ctx) {
     (void)ctx;
     int count = get_count();
 
-    // Focus overlay-aware scroll helper:
-    // "var e=document.getElementById('swim-focus')||document.scrollingElement;"
-    #define SCROLL_TARGET "var e=document.getElementById('swim-focus')||document.scrollingElement;"
-
     if (strcmp(action, "scroll-down") == 0) {
-        char js[256];
-        snprintf(js, sizeof(js), SCROLL_TARGET "e.scrollTop+=%d", 60 * count);
-        ui_run_js(app.ui, js);
+        char e[64]; snprintf(e, sizeof(e), "e.scrollTop+=%d", 60 * count); scroll_js(e);
     } else if (strcmp(action, "scroll-up") == 0) {
-        char js[256];
-        snprintf(js, sizeof(js), SCROLL_TARGET "e.scrollTop-=%d", 60 * count);
-        ui_run_js(app.ui, js);
+        char e[64]; snprintf(e, sizeof(e), "e.scrollTop-=%d", 60 * count); scroll_js(e);
     } else if (strcmp(action, "scroll-left") == 0) {
-        char js[256];
-        snprintf(js, sizeof(js), SCROLL_TARGET "e.scrollLeft-=%d", 60 * count);
-        ui_run_js(app.ui, js);
+        char e[64]; snprintf(e, sizeof(e), "e.scrollLeft-=%d", 60 * count); scroll_js(e);
     } else if (strcmp(action, "scroll-right") == 0) {
-        char js[256];
-        snprintf(js, sizeof(js), SCROLL_TARGET "e.scrollLeft+=%d", 60 * count);
-        ui_run_js(app.ui, js);
+        char e[64]; snprintf(e, sizeof(e), "e.scrollLeft+=%d", 60 * count); scroll_js(e);
     } else if (strcmp(action, "scroll-half-down") == 0) {
-        char js[256];
-        snprintf(js, sizeof(js), SCROLL_TARGET "e.scrollTop+=window.innerHeight/2*%d", count);
-        ui_run_js(app.ui, js);
+        char e[64]; snprintf(e, sizeof(e), "e.scrollTop+=window.innerHeight/2*%d", count); scroll_js(e);
     } else if (strcmp(action, "scroll-half-up") == 0) {
-        char js[256];
-        snprintf(js, sizeof(js), SCROLL_TARGET "e.scrollTop-=window.innerHeight/2*%d", count);
-        ui_run_js(app.ui, js);
+        char e[64]; snprintf(e, sizeof(e), "e.scrollTop-=window.innerHeight/2*%d", count); scroll_js(e);
     } else if (strcmp(action, "scroll-full-down") == 0) {
-        char js[256];
-        snprintf(js, sizeof(js), SCROLL_TARGET "e.scrollTop+=window.innerHeight*%d", count);
-        ui_run_js(app.ui, js);
+        char e[64]; snprintf(e, sizeof(e), "e.scrollTop+=window.innerHeight*%d", count); scroll_js(e);
     } else if (strcmp(action, "scroll-full-up") == 0) {
-        char js[256];
-        snprintf(js, sizeof(js), SCROLL_TARGET "e.scrollTop-=window.innerHeight*%d", count);
-        ui_run_js(app.ui, js);
+        char e[64]; snprintf(e, sizeof(e), "e.scrollTop-=window.innerHeight*%d", count); scroll_js(e);
     } else if (strcmp(action, "scroll-top") == 0) {
-        ui_run_js(app.ui, SCROLL_TARGET "e.scrollTop=0");
+        scroll_js("e.scrollTop=0");
     } else if (strcmp(action, "scroll-bottom") == 0) {
-        ui_run_js(app.ui, SCROLL_TARGET "e.scrollTop=e.scrollHeight");
+        scroll_js("e.scrollTop=e.scrollHeight");
     } else if (strcmp(action, "close-tab") == 0) {
         int idx = app.browser.active_tab;
         if (app.browser.tab_count <= 1) {
             ui_close(app.ui);
             return;
         }
-        browser_close_tab(&app.browser, idx);
-        ui_close_tab(app.ui, idx);
-        // Sync browser active tab with UI
+        close_tab_at(idx);
         browser_set_active(&app.browser, app.browser.active_tab);
         sync_tab_display();
     } else if (strcmp(action, "undo-close-tab") == 0) {
@@ -161,19 +219,11 @@ static void handle_action(const char *action, void *ctx) {
     } else if (strcmp(action, "prev-tab") == 0) {
         int idx = app.browser.active_tab - 1;
         if (idx < 0) idx = app.browser.tab_count - 1;
-        browser_set_active(&app.browser, idx);
-        ui_select_tab(app.ui, idx);
-        Tab *t = browser_active(&app.browser);
-        if (t && t->lazy && t->url[0]) { t->lazy = false; ui_navigate(app.ui, t->url); }
-        sync_tab_display();
+        switch_to_tab(idx);
     } else if (strcmp(action, "next-tab") == 0) {
         int idx = app.browser.active_tab + 1;
         if (idx >= app.browser.tab_count) idx = 0;
-        browser_set_active(&app.browser, idx);
-        ui_select_tab(app.ui, idx);
-        Tab *t = browser_active(&app.browser);
-        if (t && t->lazy && t->url[0]) { t->lazy = false; ui_navigate(app.ui, t->url); }
-        sync_tab_display();
+        switch_to_tab(idx);
     } else if (strcmp(action, "goto-tab") == 0) {
         int target;
         if (app.mode.count > 0) {
@@ -181,15 +231,10 @@ static void handle_action(const char *action, void *ctx) {
             if (target >= app.browser.tab_count) target = app.browser.tab_count - 1;
             if (target < 0) target = 0;
         } else {
-            // No count = next tab (same as K)
             target = app.browser.active_tab + 1;
             if (target >= app.browser.tab_count) target = 0;
         }
-        browser_set_active(&app.browser, target);
-        ui_select_tab(app.ui, target);
-        Tab *t = browser_active(&app.browser);
-        if (t && t->lazy && t->url[0]) { t->lazy = false; ui_navigate(app.ui, t->url); }
-        sync_tab_display();
+        switch_to_tab(target);
     } else if (strcmp(action, "move-tab-left") == 0) {
         int idx = app.browser.active_tab;
         int target = idx - 1;
@@ -205,24 +250,20 @@ static void handle_action(const char *action, void *ctx) {
         ui_move_tab(app.ui, idx, target);
         sync_tab_display();
     } else if (strcmp(action, "enter-command") == 0) {
-        mode_set(&app.mode, MODE_COMMAND);
-        ui_set_mode(app.ui, MODE_COMMAND);
+        app_set_mode(MODE_COMMAND);
         ui_show_command_bar(app.ui, NULL, NULL, NULL);
     } else if (strcmp(action, "command-open") == 0) {
         Tab *t = browser_active(&app.browser);
-        mode_set(&app.mode, MODE_COMMAND);
-        ui_set_mode(app.ui, MODE_COMMAND);
+        app_set_mode(MODE_COMMAND);
         ui_show_command_bar(app.ui, "open ", NULL, t ? t->url : NULL);
     } else if (strcmp(action, "command-open-current") == 0) {
         Tab *t = browser_active(&app.browser);
         if (t) {
-            mode_set(&app.mode, MODE_COMMAND);
-            ui_set_mode(app.ui, MODE_COMMAND);
+            app_set_mode(MODE_COMMAND);
             ui_show_command_bar(app.ui, "open ", t->url, NULL);
         }
     } else if (strcmp(action, "command-tabopen") == 0) {
-        mode_set(&app.mode, MODE_COMMAND);
-        ui_set_mode(app.ui, MODE_COMMAND);
+        app_set_mode(MODE_COMMAND);
         ui_show_command_bar(app.ui, "tabopen ", NULL, NULL);
     } else if (strcmp(action, "reload") == 0) {
         ui_reload(app.ui);
@@ -231,7 +272,7 @@ static void handle_action(const char *action, void *ctx) {
     } else if (strcmp(action, "forward") == 0) {
         ui_go_forward(app.ui);
     } else if (strcmp(action, "mode-normal") == 0) {
-        ui_set_mode(app.ui, MODE_NORMAL);
+        app_set_mode(MODE_NORMAL);
         ui_hide_command_bar(app.ui);
         // Dismiss focus overlay if active, otherwise blur active element
         ui_run_js(app.ui,
@@ -239,20 +280,20 @@ static void handle_action(const char *action, void *ctx) {
             "if(f){f.remove();document.body.style.overflow='';}"
             "else{document.activeElement.blur()}");
     } else if (strcmp(action, "hint-follow") == 0) {
-        mode_set(&app.mode, MODE_HINT);
-        ui_set_mode(app.ui, MODE_HINT);
-        ui_show_hints(app.ui, false);
+        app_set_mode(MODE_HINT);
+        ui_show_hints(app.ui, 0);
     } else if (strcmp(action, "hint-tab") == 0) {
-        mode_set(&app.mode, MODE_HINT);
-        ui_set_mode(app.ui, MODE_HINT);
-        ui_show_hints(app.ui, true);
+        app_set_mode(MODE_HINT);
+        ui_show_hints(app.ui, 1);
+    } else if (strcmp(action, "hint-yank") == 0) {
+        app_set_mode(MODE_HINT);
+        ui_show_hints(app.ui, 2);
     } else if (strcmp(action, "hint-filter") == 0) {
         ui_filter_hints(app.ui, app.mode.pending_keys);
     } else if (strcmp(action, "hint-cancel") == 0) {
         ui_cancel_hints(app.ui);
     } else if (strcmp(action, "find") == 0) {
-        mode_set(&app.mode, MODE_COMMAND);
-        ui_set_mode(app.ui, MODE_COMMAND);
+        app_set_mode(MODE_COMMAND);
         ui_show_find_bar(app.ui);
     } else if (strcmp(action, "find-next") == 0) {
         ui_find_next(app.ui);
@@ -290,13 +331,33 @@ static void handle_action(const char *action, void *ctx) {
     } else if (strcmp(action, "command-tabopen-current") == 0) {
         Tab *t = browser_active(&app.browser);
         if (t) {
-            mode_set(&app.mode, MODE_COMMAND);
-            ui_set_mode(app.ui, MODE_COMMAND);
+            app_set_mode(MODE_COMMAND);
             ui_show_command_bar(app.ui, "tabopen ", t->url, NULL);
         }
     } else if (strcmp(action, "enter-passthrough") == 0) {
-        mode_set(&app.mode, MODE_PASSTHROUGH);
-        ui_set_mode(app.ui, MODE_PASSTHROUGH);
+        app_set_mode(MODE_PASSTHROUGH);
+    } else if (strcmp(action, "navigate-up") == 0) {
+        Tab *t = browser_active(&app.browser);
+        if (t && t->url[0]) {
+            NSString *urlStr = [NSString stringWithUTF8String:t->url];
+            NSURL *url = [NSURL URLWithString:urlStr];
+            if (url && url.path.length > 1) {
+                NSURL *parent = [url URLByDeletingLastPathComponent];
+                if (parent) {
+                    ui_navigate(app.ui, [parent.absoluteString UTF8String]);
+                }
+            }
+        }
+    } else if (strcmp(action, "navigate-root") == 0) {
+        Tab *t = browser_active(&app.browser);
+        if (t && t->url[0]) {
+            NSString *urlStr = [NSString stringWithUTF8String:t->url];
+            NSURL *url = [NSURL URLWithString:urlStr];
+            if (url && url.scheme && url.host) {
+                NSString *root = [NSString stringWithFormat:@"%@://%@", url.scheme, url.host];
+                ui_navigate(app.ui, [root UTF8String]);
+            }
+        }
     }
 }
 
@@ -364,7 +425,66 @@ static void cmd_set(const char *args, void *ctx) {
     key[i] = '\0';
     const char *value = args[i] ? args + i + 1 : "";
 
-    config_set(&app.config, key, value);
+    if (!config_set(&app.config, key, value)) {
+        char msg[128];
+        snprintf(msg, sizeof(msg), "Invalid: %s = %s", key, value);
+        ui_set_status_message(app.ui, msg);
+        return;
+    }
+
+    // Apply live-reloadable settings
+    if (strcmp(key, "tab_bar") == 0)
+        ui_set_tab_bar_mode(app.ui, app.config.tab_bar);
+    else if (strcmp(key, "status_bar") == 0)
+        ui_set_status_bar_mode(app.ui, app.config.status_bar);
+    else if (strcmp(key, "adblock") == 0)
+        ui_set_adblock(app.ui, app.config.adblock_enabled);
+    else if (strcmp(key, "dark_mode") == 0)
+        ui_set_dark_mode(app.ui, app.config.dark_mode);
+
+    // Persist to disk
+    config_save(&app.config, app.config_path);
+
+    char msg[128];
+    snprintf(msg, sizeof(msg), "%s = %s", key, value);
+    ui_set_status_message(app.ui, msg);
+}
+
+static void cmd_settings(const char *args, void *ctx) {
+    (void)args; (void)ctx;
+    char msg[512];
+    snprintf(msg, sizeof(msg),
+        "homepage=%s search_engine=%s restore_session=%s "
+        "font_size=%d tab_bar=%s status_bar=%s theme=%s "
+        "compact_titlebar=%s adblock=%s dark_mode=%s proxy=%s",
+        app.config.homepage,
+        app.config.search_engine,
+        app.config.restore_session ? "true" : "false",
+        app.config.font_size,
+        app.config.tab_bar,
+        app.config.status_bar,
+        app.config.theme,
+        app.config.compact_titlebar ? "true" : "false",
+        app.config.adblock_enabled ? "true" : "false",
+        app.config.dark_mode ? "true" : "false",
+        app.config.proxy_type);
+    ui_set_status_message(app.ui, msg);
+}
+
+static void cmd_help(const char *args, void *ctx) {
+    (void)args; (void)ctx;
+    // List all registered commands
+    char msg[1024];
+    int pos = 0;
+    for (int i = 0; i < app.commands.count && pos < 1000; i++) {
+        Command *c = &app.commands.commands[i];
+        if (c->alias) {
+            pos += snprintf(msg + pos, sizeof(msg) - pos, ":%s(%s) ", c->name, c->alias);
+        } else {
+            pos += snprintf(msg + pos, sizeof(msg) - pos, ":%s ", c->name);
+        }
+    }
+    ui_set_status_message(app.ui, msg);
 }
 
 static void cmd_adblock(const char *args, void *ctx) {
@@ -378,283 +498,95 @@ static void cmd_adblock(const char *args, void *ctx) {
 
 static void cmd_passthrough(const char *args, void *ctx) {
     (void)args; (void)ctx;
-    mode_set(&app.mode, MODE_PASSTHROUGH);
-    ui_set_mode(app.ui, MODE_PASSTHROUGH);
+    app_set_mode(MODE_PASSTHROUGH);
+}
+
+static void cmd_private(const char *args, void *ctx) {
+    (void)ctx;
+    create_tab_ex(args && args[0] ? args : NULL, true);
+    if (args && args[0]) {
+        open_url_in_active_tab(args);
+    }
+    ui_set_status_message(app.ui, "Private tab");
+}
+
+static void cmd_darkmode(const char *args, void *ctx) {
+    (void)ctx;
+    if (args && strcmp(args, "off") == 0) {
+        app.config.dark_mode = false;
+    } else {
+        app.config.dark_mode = !app.config.dark_mode;
+    }
+    ui_set_dark_mode(app.ui, app.config.dark_mode);
+    ui_set_status_message(app.ui, app.config.dark_mode ? "Dark mode on" : "Dark mode off");
+}
+
+static void cmd_mute(const char *args, void *ctx) {
+    (void)args; (void)ctx;
+    ui_toggle_mute(app.ui);
+}
+
+static void cmd_devtools(const char *args, void *ctx) {
+    (void)args; (void)ctx;
+    ui_open_inspector(app.ui);
+}
+
+static void cmd_proxy(const char *args, void *ctx) {
+    (void)ctx;
+    if (!args || !args[0] || strcmp(args, "off") == 0) {
+        snprintf(app.config.proxy_type, sizeof(app.config.proxy_type), "none");
+        app.config.proxy_host[0] = '\0';
+        app.config.proxy_port = 0;
+        ui_set_proxy(app.ui, "none", NULL, 0);
+        return;
+    }
+
+    // Parse: "http host:port" or "socks5 host:port"
+    char type[16] = "";
+    char hostport[256] = "";
+    int i = 0;
+    while (args[i] && args[i] != ' ' && i < 15) { type[i] = args[i]; i++; }
+    type[i] = '\0';
+    if (args[i] == ' ') {
+        i++;
+        int j = 0;
+        while (args[i] && j < 255) { hostport[j++] = args[i++]; }
+        hostport[j] = '\0';
+    }
+
+    if (!hostport[0]) {
+        ui_set_status_message(app.ui, "Usage: proxy http|socks5 host:port");
+        return;
+    }
+
+    // Split host:port
+    char host[256] = "";
+    int port = 0;
+    char *colon = strrchr(hostport, ':');
+    if (colon) {
+        int hlen = (int)(colon - hostport);
+        snprintf(host, sizeof(host), "%.*s", hlen, hostport);
+        port = atoi(colon + 1);
+    } else {
+        snprintf(host, sizeof(host), "%s", hostport);
+        port = (strcmp(type, "socks5") == 0) ? 1080 : 8080;
+    }
+
+    snprintf(app.config.proxy_type, sizeof(app.config.proxy_type), "%s", type);
+    snprintf(app.config.proxy_host, sizeof(app.config.proxy_host), "%s", host);
+    app.config.proxy_port = port;
+    ui_set_proxy(app.ui, type, host, port);
 }
 
 static void cmd_focus(const char *args, void *ctx) {
     (void)args; (void)ctx;
-    char bg[8], sbg[8], fg[8], fgd[8], acc[8];
-    theme_hex(app.theme.bg, bg);
-    theme_hex(app.theme.status_bg, sbg);
-    theme_hex(app.theme.fg, fg);
-    theme_hex(app.theme.fg_dim, fgd);
-    theme_hex(app.theme.accent, acc);
-
-    char focus_js[16384];
-    snprintf(focus_js, sizeof(focus_js),
-        "(function(){"
-
-        // Toggle off
-        "var overlay=document.getElementById('swim-focus');"
-        "if(overlay){overlay.remove();document.body.style.overflow='';return;}"
-
-        // Find main content — site-specific then generic
-        "var article,isReddit=location.hostname==='old.reddit.com';"
-        "var isRedditListing=false;"
-        "if(isReddit){"
-        "  article=document.querySelector('.sitetable.nestedlisting');"
-        "  if(!article){article=document.querySelector('#siteTable');isRedditListing=!!article;}"
-        "}else{"
-        "  article=document.querySelector('article')"
-        "  ||document.querySelector('[role=main]')"
-        "  ||document.querySelector('.post-content,.entry-content,main');"
-        "}"
-        "if(!article){"
-        "  var ps=document.querySelectorAll('p'),best=null,bestLen=0;"
-        "  var cs=new Set();ps.forEach(function(p){cs.add(p.parentElement)});"
-        "  cs.forEach(function(c){var l=c.textContent.length;if(l>bestLen){bestLen=l;best=c}});"
-        "  article=best;"
-        "}"
-        "if(!article)return;"
-
-        // Get title text, strip common site suffixes
-        "var titleText=document.title||'';"
-        "titleText=titleText.replace(/\\s*[-|\\u2013\\u2014]\\s*(Wikipedia|Reddit|reddit\\.com).*$/i,'');"
-        "titleText=titleText.replace(/\\s*:\\s*(reddit\\.com)$/i,'');"
-        "if(isReddit&&!isRedditListing){"
-        "  var pt=document.querySelector('.top-matter .title a');"
-        "  if(pt)titleText=pt.textContent;"
-        "}"
-
-        // Build overlay
-        "var o=document.createElement('div');"
-        "o.id='swim-focus';"
-        "o.style.cssText='position:fixed;top:0;left:0;width:100%%;height:100%%;"
-        "z-index:99999;background:%s;overflow-y:auto;';"
-
-        // Inner content column
-        "var inner=document.createElement('div');"
-        "inner.style.cssText='max-width:700px;margin:60px auto 120px;padding:0 40px;';"
-
-        // Title
-        "var h=document.createElement('h1');"
-        "h.textContent=titleText;"
-        "h.style.cssText='font:bold 26px/1.3 system-ui,-apple-system,sans-serif;"
-        "color:%s;margin:0 0 8px;border:none;letter-spacing:-0.3px;';"
-        "inner.appendChild(h);"
-
-        // Reddit post body (self-text, images, galleries, video)
-        "if(isReddit&&!isRedditListing){"
-        "  (function loadRedditMedia(){"
-        "    var jsonUrl=location.pathname.replace(/\\/$/,'')+ '.json';"
-        "    fetch(jsonUrl).then(function(r){return r.json()}).then(function(data){"
-        "      var post=data[0].data.children[0].data;"
-        "      if(post.media_metadata){"
-        "        var ids=post.gallery_data?post.gallery_data.items.map(function(i){return i.media_id})"
-        "          :Object.keys(post.media_metadata);"
-        "        ids.forEach(function(id){"
-        "          var m=post.media_metadata[id];if(!m||m.status!=='valid')return;"
-        "          var src=m.s?m.s.u||m.s.gif||'':'';"
-        "          src=src.replace(/&amp;/g,'&');"
-        "          if(!src)return;"
-        "          var img=document.createElement('img');img.src=src;img.loading='lazy';"
-        "          img.style.cssText='max-width:100%%;height:auto;border-radius:4px;margin:0 0 16px;';"
-        "          inner.insertBefore(img,inner.querySelector('#swim-focus-sep'));"
-        "        });"
-        "      }"
-        "      else if(post.url&&/\\.(jpg|jpeg|png|gif|webp)(\\?.*)?$/i.test(post.url)){"
-        "        var img=document.createElement('img');img.src=post.url;"
-        "        img.style.cssText='max-width:100%%;height:auto;border-radius:4px;margin:0 0 16px;';"
-        "        inner.insertBefore(img,inner.querySelector('#swim-focus-sep'));"
-        "      }"
-        "      else if(post.preview&&post.preview.images&&post.preview.images[0]){"
-        "        var src=post.preview.images[0].source.url.replace(/&amp;/g,'&');"
-        "        var img=document.createElement('img');img.src=src;"
-        "        img.style.cssText='max-width:100%%;height:auto;border-radius:4px;margin:0 0 16px;';"
-        "        inner.insertBefore(img,inner.querySelector('#swim-focus-sep'));"
-        "      }"
-        "      if(post.secure_media&&post.secure_media.reddit_video){"
-        "        var v=document.createElement('video');v.controls=true;"
-        "        v.src=post.secure_media.reddit_video.fallback_url;"
-        "        v.style.cssText='max-width:100%%;border-radius:4px;margin:0 0 16px;';"
-        "        inner.insertBefore(v,inner.querySelector('#swim-focus-sep'));"
-        "      }"
-        "    }).catch(function(){});"
-        "  })();"
-        "  var selfText=document.querySelector('.expando .usertext-body');"
-        "  if(selfText&&selfText.textContent.trim()){"
-        "    var pb=selfText.cloneNode(true);"
-        "    pb.style.cssText='font:15px/1.7 Georgia,serif;color:%s;margin:0 0 8px;';"
-        "    inner.appendChild(pb);"
-        "  }"
-        "}"
-
-        // Separator
-        "var hr=document.createElement('div');"
-        "hr.id='swim-focus-sep';"
-        "hr.style.cssText='width:60px;height:1px;background:%s;margin:16px 0 32px;';"
-        "inner.appendChild(hr);"
-
-        // Extract content — reddit-specific
-        "if(isReddit&&isRedditListing){"
-        "  var things=article.querySelectorAll('.thing.link');"
-        "  things.forEach(function(t){"
-        "    var titleEl=t.querySelector('.title a.title');"
-        "    if(!titleEl)return;"
-        "    var author=t.querySelector('.author');"
-        "    var score=t.querySelector('.score.unvoted');"
-        "    var comments=t.querySelector('.comments');"
-        "    var domain=t.querySelector('.domain a');"
-        "    var selfText=t.querySelector('.expando .usertext-body');"
-        "    var thumb=t.querySelector('.thumbnail img');"
-
-        "    var row=document.createElement('div');"
-        "    row.style.cssText='padding:16px 0;border-bottom:1px solid %s;';"
-
-        "    var h=document.createElement('a');"
-        "    h.href=titleEl.href;"
-        "    h.textContent=titleEl.textContent;"
-        "    h.style.cssText='font:bold 16px/1.4 system-ui,sans-serif;color:%s;"
-        "    text-decoration:none;display:block;margin:0 0 6px;';"
-        "    row.appendChild(h);"
-
-        "    if(thumb&&thumb.src&&!thumb.src.includes('self')&&!thumb.src.includes('nsfw')){"
-        "      var img=document.createElement('img');img.src=thumb.src;img.loading='lazy';"
-        "      img.style.cssText='max-width:100%%;max-height:300px;border-radius:4px;margin:0 0 8px;display:block;';"
-        "      row.appendChild(img);"
-        "    }"
-
-        "    if(selfText&&selfText.textContent.trim()){"
-        "      var preview=document.createElement('div');"
-        "      preview.innerHTML=selfText.innerHTML;"
-        "      preview.style.cssText='font:14px/1.6 Georgia,serif;color:%s;margin:0 0 8px;"
-        "      max-height:120px;overflow:hidden;';"
-        "      row.appendChild(preview);"
-        "    }"
-
-        "    var meta=document.createElement('div');"
-        "    meta.style.cssText='font:12px/1 system-ui,sans-serif;color:%s;';"
-        "    var parts=[];"
-        "    if(score)parts.push(score.textContent);"
-        "    if(author)parts.push(author.textContent);"
-        "    if(comments)parts.push(comments.textContent);"
-        "    if(domain)parts.push(domain.textContent);"
-        "    meta.textContent=parts.join(' \\u00B7 ');"
-        "    row.appendChild(meta);"
-
-        "    inner.appendChild(row);"
-        "  });"
-        "}else if(isReddit){"
-        "  var comments=article.querySelectorAll('.comment');"
-        "  comments.forEach(function(c){"
-        "    var entry=c.querySelector('.entry');"
-        "    if(!entry)return;"
-        "    var author=c.querySelector('.author');"
-        "    var body=c.querySelector('.usertext-body');"
-        "    var score=c.querySelector('.score.unvoted');"
-        "    if(!body||!body.textContent.trim())return;"
-        "    var depth=0;var p=c;while(p=p.parentElement){"
-        "      if(p.classList&&p.classList.contains('comment'))depth++;"
-        "    }"
-
-        "    var row=document.createElement('div');"
-        "    row.style.cssText='margin:0 0 4px;padding:12px 0 12px '+(depth*24)+'px;"
-        "    border-bottom:1px solid %s;';"
-
-        "    var meta=document.createElement('div');"
-        "    meta.style.cssText='font:12px/1 system-ui,sans-serif;color:%s;margin:0 0 6px;';"
-        "    meta.textContent=(author?author.textContent:'[deleted]')"
-        "      +(score?' \\u00B7 '+score.textContent:'');"
-        "    row.appendChild(meta);"
-
-        "    var text=document.createElement('div');"
-        "    text.innerHTML=body.innerHTML;"
-        "    text.style.cssText='font:15px/1.7 Georgia,serif;color:%s;';"
-        "    text.querySelectorAll('a').forEach(function(a){"
-        "      var u=a.href||'';"
-        "      if(/\\.(jpg|jpeg|png|gif|webp)(\\?.*)?$/i.test(u)"
-        "        ||/i\\.redd\\.it|preview\\.redd\\.it|i\\.imgur\\.com/i.test(u)){"
-        "        var img=document.createElement('img');"
-        "        img.src=u;img.loading='lazy';"
-        "        img.style.cssText='max-width:100%%;height:auto;border-radius:4px;margin:8px 0;display:block;';"
-        "        a.parentNode.insertBefore(img,a.nextSibling);"
-        "      }"
-        "    });"
-        "    row.appendChild(text);"
-
-        "    inner.appendChild(row);"
-        "  });"
-        "}else{"
-
-        "  var clone=article.cloneNode(true);"
-        "  clone.querySelectorAll('nav,header,footer,.sidebar,.ad,.social-share,"
-        ".related-posts,.newsletter,aside,[role=complementary],"
-        "script,style,iframe,.share,.hidden').forEach(function(e){e.remove()});"
-        "  inner.appendChild(clone);"
-        "}"
-
-        // Styles
-        "var s=document.createElement('style');"
-        "s.textContent='"
-        "#swim-focus *{box-sizing:border-box}"
-        "#swim-focus p{margin:0 0 1.2em;line-height:1.7}"
-        "#swim-focus img{max-width:100%%;height:auto;border-radius:4px;margin:1em auto;display:block}"
-        "#swim-focus a{color:%s;text-decoration:none}"
-        "#swim-focus a:hover{text-decoration:underline}"
-        "#swim-focus pre{background:%s;padding:16px;border-radius:6px;"
-        "overflow-x:auto;font:14px/1.5 ui-monospace,monospace;color:%s}"
-        "#swim-focus code{font:14px ui-monospace,monospace;color:%s;"
-        "background:%s;padding:2px 5px;border-radius:3px}"
-        "#swim-focus pre code{padding:0;background:none}"
-        "#swim-focus h1,#swim-focus h2,#swim-focus h3,#swim-focus h4{"
-        "font-family:system-ui,sans-serif;color:%s;margin:1.5em 0 0.5em;line-height:1.3}"
-        "#swim-focus h2{font-size:22px}#swim-focus h3{font-size:18px}"
-        "#swim-focus blockquote{border-left:3px solid %s;margin:1em 0;padding:0 0 0 20px;color:%s}"
-        "#swim-focus ul,#swim-focus ol{padding-left:24px}"
-        "#swim-focus li{margin:0.3em 0;color:%s}"
-        "#swim-focus table{border-collapse:collapse;width:100%%;margin:1em 0}"
-        "#swim-focus td,#swim-focus th{border:1px solid %s;padding:8px;text-align:left;color:%s}"
-        "#swim-focus th{background:%s;color:%s}"
-        "#swim-focus hr{border:none;border-top:1px solid %s;margin:2em 0}"
-        "#swim-focus .md{font:15px/1.7 Georgia,serif;color:%s}"
-        "';"
-        "o.appendChild(s);"
-
-        "o.appendChild(inner);"
-        "document.body.appendChild(o);"
-        "document.body.style.overflow='hidden';"
-        "o.scrollTop=0;"
-        "o.focus();"
-        "})()",
-        /* overlay bg */ bg,
-        /* title color */ fg,
-        /* self-text color */ fg,
-        /* separator */ fgd,
-        /* listing row border */ sbg,
-        /* listing link color */ acc,
-        /* listing preview text */ fgd,
-        /* listing meta */ fgd,
-        /* comment row border */ sbg,
-        /* comment meta */ fgd,
-        /* comment text */ fg,
-        /* style: a color */ acc,
-        /* style: pre bg */ sbg,
-        /* style: pre/code text */ fgd,
-        /* style: code text */ fgd,
-        /* style: code bg */ sbg,
-        /* style: headings */ fg,
-        /* style: blockquote border */ fgd,
-        /* style: blockquote text */ fgd,
-        /* style: li color */ fg,
-        /* style: td/th border */ sbg,
-        /* style: td/th text */ fgd,
-        /* style: th bg */ sbg,
-        /* style: th text */ fg,
-        /* style: hr border */ sbg,
-        /* style: .md text */ fg
-    );
-    ui_run_js(app.ui, focus_js);
+    char *js = focus_build_js(&app.theme, app.scripts_path);
+    if (!js) {
+        ui_set_status_message(app.ui, "Failed to load focus mode");
+        return;
+    }
+    ui_run_js(app.ui, js);
+    free(js);
 }
 
 static void cmd_session(const char *args, void *ctx) {
@@ -697,11 +629,7 @@ static void cmd_session(const char *args, void *ctx) {
 
     if (strcmp(subcmd, "save") == 0) {
         const char *urls[128];
-        int count = 0;
-        for (int k = 0; k < app.browser.tab_count && count < 128; k++) {
-            if (app.browser.tabs[k].url[0])
-                urls[count++] = app.browser.tabs[k].url;
-        }
+        int count = collect_tab_urls(urls, 128);
         session_save(path, urls, count);
         char msg[256];
         snprintf(msg, sizeof(msg), "Session '%s' saved (%d tabs)", name, count);
@@ -765,8 +693,7 @@ static void cmd_tabclose(const char *args, void *ctx) {
         return;
     }
 
-    browser_close_tab(&app.browser, target);
-    ui_close_tab(app.ui, target);
+    close_tab_at(target);
     browser_set_active(&app.browser, app.browser.active_tab);
     sync_tab_display();
 }
@@ -777,8 +704,7 @@ static void cmd_tabonly(const char *args, void *ctx) {
 
     for (int i = app.browser.tab_count - 1; i >= 0; i--) {
         if (i == keep) continue;
-        browser_close_tab(&app.browser, i);
-        ui_close_tab(app.ui, i);
+        close_tab_at(i);
         if (i < keep) keep--;
     }
     browser_set_active(&app.browser, 0);
@@ -875,8 +801,7 @@ static void substitute_vars(const char *input, char *output, int output_size) {
 
 static void on_command_submit(const char *text, void *ctx) {
     (void)ctx;
-    mode_set(&app.mode, MODE_NORMAL);
-    ui_set_mode(app.ui, MODE_NORMAL);
+    app_set_mode(MODE_NORMAL);
     ui_hide_command_bar(app.ui);
 
     // Variable substitution
@@ -892,8 +817,7 @@ static void on_command_submit(const char *text, void *ctx) {
 
 static void on_command_cancel(void *ctx) {
     (void)ctx;
-    mode_set(&app.mode, MODE_NORMAL);
-    ui_set_mode(app.ui, MODE_NORMAL);
+    app_set_mode(MODE_NORMAL);
     ui_hide_command_bar(app.ui);
 }
 
@@ -904,8 +828,8 @@ static void on_url_changed(const char *url, int tab_id, void *ctx) {
     if (t && t->id == tab_id) {
         set_url_with_tls(url);
     }
-    // Record in history
-    if (url && strncmp(url, "about:", 6) != 0) {
+    // Record in history (skip private tabs)
+    if (url && strncmp(url, "about:", 6) != 0 && !ui_tab_is_private(app.ui, tab_id)) {
         int idx = browser_find_tab(&app.browser, tab_id);
         const char *title = (idx >= 0) ? app.browser.tabs[idx].title : "";
         storage_add(&app.history, url, title);
@@ -933,39 +857,60 @@ static void on_load_changed(bool loading, double progress, int tab_id, void *ctx
 
 static void on_focus_changed(bool focused, void *ctx) {
     (void)ctx;
-    if (focused) {
-        mode_set(&app.mode, MODE_INSERT);
-        ui_set_mode(app.ui, MODE_INSERT);
-    } else {
-        mode_set(&app.mode, MODE_NORMAL);
-        ui_set_mode(app.ui, MODE_NORMAL);
-    }
+    app_set_mode(focused ? MODE_INSERT : MODE_NORMAL);
 }
 
 static void on_hints_done(void *ctx) {
     (void)ctx;
-    mode_set(&app.mode, MODE_NORMAL);
-    ui_set_mode(app.ui, MODE_NORMAL);
+    app_set_mode(MODE_NORMAL);
 }
 
-static const char *on_command_complete(const char *prefix, void *ctx) {
+static char url_complete_buf[2048];
+static int url_complete_idx;
+
+static const char *on_command_complete(const char *prefix, const char *cmd_prefix, void *ctx) {
     (void)ctx;
+
+    // URL completion for open/tabopen commands
+    if (cmd_prefix[0]) {
+        int results[64];
+        int count = storage_search(&app.history, prefix, results, 64);
+        int bm_results[64];
+        int bm_count = storage_search(&app.bookmarks, prefix, bm_results, 64);
+
+        // On first tab or new prefix, reset index
+        static char last_prefix[256];
+        if (strcmp(prefix, last_prefix) != 0) {
+            url_complete_idx = 0;
+            snprintf(last_prefix, sizeof(last_prefix), "%s", prefix);
+        } else {
+            url_complete_idx++;
+        }
+
+        // Cycle through bookmarks first, then history
+        if (url_complete_idx < bm_count) {
+            snprintf(url_complete_buf, sizeof(url_complete_buf), "%s",
+                app.bookmarks.entries[bm_results[url_complete_idx]].url);
+            return url_complete_buf;
+        }
+        int hist_idx = url_complete_idx - bm_count;
+        if (hist_idx < count) {
+            snprintf(url_complete_buf, sizeof(url_complete_buf), "%s",
+                app.history.entries[results[hist_idx]].url);
+            return url_complete_buf;
+        }
+        // Wrap around
+        url_complete_idx = -1;  // will increment to 0 next time
+        return NULL;
+    }
+
+    // Command name completion
     return registry_complete(&app.commands, prefix);
 }
 
 static void on_tab_selected(int index, void *ctx) {
     (void)ctx;
-    browser_set_active(&app.browser, index);
-    ui_select_tab(app.ui, index);
-
-    // Lazy tab loading: navigate on first select
-    Tab *t = browser_active(&app.browser);
-    if (t && t->lazy && t->url[0]) {
-        t->lazy = false;
-        ui_navigate(app.ui, t->url);
-    }
-
-    sync_tab_display();
+    switch_to_tab(index);
 }
 
 // --- Main ---
@@ -976,14 +921,12 @@ int main(int argc, const char *argv[]) {
         [NSApplication sharedApplication];
         [NSApp setActivationPolicy:NSApplicationActivationPolicyRegular];
 
-#ifdef SWIM_TEST
-        int test_port = 0;
+        int serve_port = 0;
         for (int i = 1; i < argc; i++) {
-            if (strcmp(argv[i], "--test-server") == 0 && i + 1 < argc) {
-                test_port = atoi(argv[++i]);
+            if (strcmp(argv[i], "--serve") == 0 && i + 1 < argc) {
+                serve_port = atoi(argv[++i]);
             }
         }
-#endif
 
         // Ensure config dir exists
         storage_ensure_dir();
@@ -1010,6 +953,7 @@ int main(int argc, const char *argv[]) {
         snprintf(app.scripts_path, sizeof(app.scripts_path),
             "%s/.config/swim/scripts", home ? home : ".");
         userscript_create_defaults(app.scripts_path);
+        focus_create_default(app.scripts_path);
         userscript_init(&app.userscripts);
         userscript_load_dir(&app.userscripts, app.scripts_path);
 
@@ -1048,6 +992,7 @@ int main(int argc, const char *argv[]) {
         registry_add(&app.commands, "marks", NULL, cmd_marks, "Search bookmarks");
         registry_add(&app.commands, "history", NULL, cmd_history, "Search history");
         registry_add(&app.commands, "set", NULL, cmd_set, "Set config value");
+        registry_add(&app.commands, "settings", NULL, cmd_settings, "Show current settings");
         registry_add(&app.commands, "passthrough", NULL, cmd_passthrough, "Enter passthrough mode");
         registry_add(&app.commands, "focus", NULL, cmd_focus, "Reader mode");
         registry_add(&app.commands, "session", NULL, cmd_session, "Save/load named sessions");
@@ -1055,6 +1000,12 @@ int main(int argc, const char *argv[]) {
         registry_add(&app.commands, "tabclose", "tc", cmd_tabclose, "Close tab by number");
         registry_add(&app.commands, "tabonly", NULL, cmd_tabonly, "Close all tabs except current");
         registry_add(&app.commands, "scripts", NULL, cmd_scripts, "List/reload userscripts");
+        registry_add(&app.commands, "help", "h", cmd_help, "List all commands");
+        registry_add(&app.commands, "private", "p", cmd_private, "Open private tab");
+        registry_add(&app.commands, "darkmode", "dm", cmd_darkmode, "Toggle dark mode");
+        registry_add(&app.commands, "mute", NULL, cmd_mute, "Toggle tab audio mute");
+        registry_add(&app.commands, "devtools", NULL, cmd_devtools, "Open web inspector");
+        registry_add(&app.commands, "proxy", NULL, cmd_proxy, "Set proxy (http|socks5 host:port)");
 
         // Create UI
         UICallbacks callbacks = {
@@ -1069,11 +1020,22 @@ int main(int argc, const char *argv[]) {
             .on_command_complete = on_command_complete,
             .ctx = &app,
         };
-        app.ui = ui_create(callbacks, app.config.compact_titlebar, &app.theme);
+        app.ui = ui_create(callbacks, app.config.compact_titlebar, app.config.tab_bar, app.config.status_bar, &app.theme);
 
         // Load adblock rules
         if (app.config.adblock_enabled) {
             ui_load_blocklist(app.ui);
+        }
+
+        // Apply dark mode
+        if (app.config.dark_mode) {
+            ui_set_dark_mode(app.ui, true);
+        }
+
+        // Apply proxy if configured
+        if (strcmp(app.config.proxy_type, "none") != 0 && app.config.proxy_host[0]) {
+            ui_set_proxy(app.ui, app.config.proxy_type,
+                app.config.proxy_host, app.config.proxy_port);
         }
 
         // Wire userscripts into UI
@@ -1085,9 +1047,7 @@ int main(int argc, const char *argv[]) {
             // CLI arguments: ./swim url1 url2 ...
             for (int i = 1; i < argc; i++) {
                 if (argv[i][0] == '-') {
-#ifdef SWIM_TEST
-                    if (strcmp(argv[i], "--test-server") == 0 && i + 1 < argc) i++;  // skip port arg
-#endif
+                    if (strcmp(argv[i], "--serve") == 0 && i + 1 < argc) i++;
                     continue;
                 }
                 create_tab(argv[i]);
@@ -1102,7 +1062,7 @@ int main(int argc, const char *argv[]) {
                         int tab_id = browser_add_tab(&app.browser, session_urls[i]);
                         int idx = browser_find_tab(&app.browser, tab_id);
                         if (idx >= 0) app.browser.tabs[idx].lazy = true;
-                        ui_add_tab(app.ui, NULL, tab_id);
+                        ui_add_tab(app.ui, NULL, tab_id, false);
                         ui_update_tab_title(app.ui, tab_id, session_urls[i]);
                     }
                     browser_set_active(&app.browser, 0);
@@ -1116,14 +1076,9 @@ int main(int argc, const char *argv[]) {
             }
         }
 
-#ifdef SWIM_TEST
-        if (test_port > 0) {
-            // Fixed window size for consistent screenshots, offscreen to avoid disruption
-            NSWindow *test_window = (__bridge NSWindow *)ui_get_window(app.ui);
-            [test_window setFrame:NSMakeRect(-2000, -2000, 1280, 800) display:YES animate:NO];
-
-            static TestContext test_ctx;
-            test_ctx = (TestContext){
+        if (serve_port > 0) {
+            static ServeContext serve_ctx;
+            serve_ctx = (ServeContext){
                 .ui = app.ui,
                 .browser = &app.browser,
                 .mode = &app.mode,
@@ -1131,10 +1086,8 @@ int main(int argc, const char *argv[]) {
                 .handle_action = handle_action,
                 .action_ctx = &app,
             };
-            // test_ctx is static — safe for the server thread to reference
-            test_server_start(test_port, &test_ctx);
+            serve_start(serve_port, &serve_ctx);
         }
-#endif
 
         // Key event monitor
         [NSEvent addLocalMonitorForEventsMatchingMask:NSEventMaskKeyDown
@@ -1194,12 +1147,7 @@ int main(int argc, const char *argv[]) {
         // Save session
         {
             const char *urls[128];
-            int count = 0;
-            for (int i = 0; i < app.browser.tab_count && count < 128; i++) {
-                if (app.browser.tabs[i].url[0]) {
-                    urls[count++] = app.browser.tabs[i].url;
-                }
-            }
+            int count = collect_tab_urls(urls, 128);
             session_save(app.session_path, urls, count);
         }
 
