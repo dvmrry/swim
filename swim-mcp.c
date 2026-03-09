@@ -38,8 +38,25 @@ static char *json_get_string(const char *json, const char *key) {
         }
         int len = (int)(end - q);
         char *result = malloc(len + 1);
-        memcpy(result, q, len);
-        result[len] = '\0';
+        // Unescape JSON string: \" -> ", \\ -> \, \n -> newline, etc.
+        int j = 0;
+        for (int i = 0; i < len; i++) {
+            if (q[i] == '\\' && i + 1 < len) {
+                i++;
+                switch (q[i]) {
+                    case '"':  result[j++] = '"'; break;
+                    case '\\': result[j++] = '\\'; break;
+                    case 'n':  result[j++] = '\n'; break;
+                    case 'r':  result[j++] = '\r'; break;
+                    case 't':  result[j++] = '\t'; break;
+                    case '/':  result[j++] = '/'; break;
+                    default:   result[j++] = '\\'; result[j++] = q[i]; break;
+                }
+            } else {
+                result[j++] = q[i];
+            }
+        }
+        result[j] = '\0';
         return result;
     }
     return NULL;
