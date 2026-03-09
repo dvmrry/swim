@@ -313,17 +313,27 @@ static NSDictionary *do_wait(NSDictionary *json, ServeContext *ctx) {
 
 static NSDictionary *do_wait_for(NSDictionary *json, ServeContext *ctx) {
     NSString *selector = json[@"selector"];
-    if (!selector) return @{@"ok": @NO, @"error": @"missing selector"};
+    NSString *url_contains = json[@"url_contains"];
+    if (!selector && !url_contains)
+        return @{@"ok": @NO, @"error": @"missing selector or url_contains"};
 
     NSNumber *timeout_ms = json[@"timeout"];
     double timeout_sec = timeout_ms ? [timeout_ms doubleValue] / 1000.0 : 10.0;
     if (timeout_sec > 30.0) timeout_sec = 30.0;
     if (timeout_sec < 0.1) timeout_sec = 0.1;
 
-    NSString *escapedSel = [selector stringByReplacingOccurrencesOfString:@"'"
-                                                              withString:@"\\'"];
-    NSString *js = [NSString stringWithFormat:
-        @"!!document.querySelector('%@')", escapedSel];
+    NSString *js;
+    if (selector) {
+        NSString *escapedSel = [selector stringByReplacingOccurrencesOfString:@"'"
+                                                                  withString:@"\\'"];
+        js = [NSString stringWithFormat:
+            @"!!document.querySelector('%@')", escapedSel];
+    } else {
+        NSString *escapedUrl = [url_contains stringByReplacingOccurrencesOfString:@"'"
+                                                                      withString:@"\\'"];
+        js = [NSString stringWithFormat:
+            @"location.href.indexOf('%@')!==-1", escapedUrl];
+    }
 
     __block bool found = false;
     dispatch_sync(dispatch_get_main_queue(), ^{
@@ -640,6 +650,230 @@ static NSDictionary *do_click(NSDictionary *json, ServeContext *ctx) {
     return result ?: @{@"ok": @NO, @"error": @"click failed"};
 }
 
+// --- Feature: /query — read element text, attributes, visibility ---
+
+static NSDictionary *do_query(NSDictionary *json, ServeContext *ctx) {
+    NSString *selector = json[@"selector"];
+    if (!selector) return @{@"ok": @NO, @"error": @"missing selector"};
+
+    NSString *attribute = json[@"attribute"];
+    NSNumber *allFlag = json[@"all"];
+    BOOL queryAll = allFlag && [allFlag boolValue];
+
+    NSString *escapedSel = [selector stringByReplacingOccurrencesOfString:@"\\"
+                                                              withString:@"\\\\"];
+    escapedSel = [escapedSel stringByReplacingOccurrencesOfString:@"'"
+                                                       withString:@"\\'"];
+
+    NSMutableString *js = [NSMutableString string];
+    [js appendString:@"(function(){"];
+
+    if (queryAll) {
+        [js appendFormat:
+            @"var els=document.querySelectorAll('%@');"
+            "if(!els.length)return JSON.stringify({ok:true,found:false,results:[]});"
+            "var results=[];var max=20;"
+            "for(var i=0;i<els.length&&i<max;i++){var el=els[i];",
+            escapedSel];
+    } else {
+        [js appendFormat:
+            @"var el=document.querySelector('%@');"
+            "if(!el)return JSON.stringify({ok:true,found:false});",
+            escapedSel];
+    }
+
+    // Shared element info extraction
+    NSString *extractInfo;
+    if (attribute) {
+        NSString *escapedAttr = [attribute stringByReplacingOccurrencesOfString:@"'"
+                                                                    withString:@"\\'"];
+        extractInfo = [NSString stringWithFormat:
+            @"var val=el.getAttribute('%@');"
+            "var info={tag:el.tagName.toLowerCase(),value:val};", escapedAttr];
+    } else {
+        extractInfo =
+            @"var r=el.getBoundingClientRect();"
+            "var s=window.getComputedStyle(el);"
+            "var vis=s.display!=='none'&&s.visibility!=='hidden'&&r.width>0&&r.height>0;"
+            "var attrs={};"
+            "for(var j=0;j<el.attributes.length&&j<30;j++){"
+            "  attrs[el.attributes[j].name]=el.attributes[j].value.substring(0,500)}"
+            "var info={"
+            "  tag:el.tagName.toLowerCase(),"
+            "  text:el.textContent.trim().substring(0,2000),"
+            "  visible:vis,"
+            "  attributes:attrs,"
+            "  rect:{x:Math.round(r.x),y:Math.round(r.y),"
+            "        width:Math.round(r.width),height:Math.round(r.height)}"
+            "};";
+    }
+    [js appendString:extractInfo];
+
+    if (queryAll) {
+        [js appendString:@"results.push(info)}"];
+        [js appendString:
+            @"return JSON.stringify({ok:true,found:true,count:els.length,results:results})"];
+    } else {
+        [js appendString:
+            @"info.ok=true;info.found=true;"
+            "return JSON.stringify(info)"];
+    }
+
+    [js appendString:@"})()"];
+
+    __block NSDictionary *result = nil;
+    dispatch_sync(dispatch_get_main_queue(), ^{
+        WKWebView *wv = (__bridge WKWebView *)ui_get_active_webview(ctx->ui);
+        if (!wv) { result = @{@"ok": @NO, @"error": @"no active webview"}; return; }
+
+        __block BOOL done = NO;
+        __block NSDictionary *response = nil;
+
+        [wv evaluateJavaScript:js completionHandler:^(id res, NSError *error) {
+            if (error) {
+                response = @{@"ok": @NO, @"error": error.localizedDescription ?: @"unknown"};
+            } else if (res && [res isKindOfClass:[NSString class]]) {
+                NSData *data = [(NSString *)res dataUsingEncoding:NSUTF8StringEncoding];
+                response = [NSJSONSerialization JSONObjectWithData:data options:0 error:nil];
+            }
+            done = YES;
+        }];
+
+        NSDate *timeout = [NSDate dateWithTimeIntervalSinceNow:5.0];
+        while (!done && [[NSRunLoop currentRunLoop] runMode:NSDefaultRunLoopMode
+                                                beforeDate:timeout]) {
+            if ([timeout timeIntervalSinceNow] <= 0) break;
+        }
+
+        if (!done) result = @{@"ok": @NO, @"error": @"query timeout"};
+        else if (response) result = response;
+        else result = @{@"ok": @NO, @"error": @"query failed"};
+    });
+    return result ?: @{@"ok": @NO, @"error": @"query failed"};
+}
+
+// --- Feature: /wait_for with url_contains for navigation wait ---
+// (Handled by extending do_wait_for — see modified version above)
+
+// --- Feature: /tab — switch to tab by index ---
+
+static NSDictionary *do_tab(NSDictionary *json, ServeContext *ctx) {
+    NSNumber *index = json[@"index"];
+    if (!index) return @{@"ok": @NO, @"error": @"missing index"};
+
+    int idx = [index intValue];
+
+    __block NSDictionary *result = nil;
+    dispatch_sync(dispatch_get_main_queue(), ^{
+        if (idx < 0 || idx >= ctx->browser->tab_count) {
+            result = @{@"ok": @NO, @"error": @"index out of range",
+                       @"tab_count": @(ctx->browser->tab_count)};
+            return;
+        }
+
+        browser_set_active(ctx->browser, idx);
+        ui_select_tab(ctx->ui, idx);
+
+        Tab *t = browser_active(ctx->browser);
+        if (t && t->lazy && t->url[0]) {
+            t->lazy = false;
+            ui_navigate(ctx->ui, t->url);
+        }
+
+        result = @{
+            @"ok": @YES,
+            @"active_tab": @(idx),
+            @"url": [NSString stringWithUTF8String:t ? t->url : ""],
+            @"title": [NSString stringWithUTF8String:t ? t->title : ""],
+        };
+    });
+    return result ?: @{@"ok": @NO, @"error": @"tab switch failed"};
+}
+
+// --- Feature: /select — choose option by visible text ---
+
+static NSDictionary *do_select(NSDictionary *json, ServeContext *ctx) {
+    NSString *selector = json[@"selector"];
+    if (!selector) return @{@"ok": @NO, @"error": @"missing selector"};
+
+    NSString *text = json[@"text"];
+    NSString *value = json[@"value"];
+    if (!text && !value) return @{@"ok": @NO, @"error": @"missing text or value"};
+
+    NSString *escapedSel = [selector stringByReplacingOccurrencesOfString:@"\\"
+                                                              withString:@"\\\\"];
+    escapedSel = [escapedSel stringByReplacingOccurrencesOfString:@"'"
+                                                       withString:@"\\'"];
+
+    NSMutableString *js = [NSMutableString stringWithString:
+        @"(function(){"
+        "var el=document.querySelector('"];
+    [js appendString:escapedSel];
+    [js appendString:@"');"];
+    [js appendString:@"if(!el||el.tagName!=='SELECT')"
+        "return JSON.stringify({ok:false,error:'not a select element'});"];
+
+    if (text) {
+        NSString *escapedText = [text stringByReplacingOccurrencesOfString:@"\\"
+                                                               withString:@"\\\\"];
+        escapedText = [escapedText stringByReplacingOccurrencesOfString:@"'"
+                                                            withString:@"\\'"];
+        [js appendFormat:
+            @"for(var i=0;i<el.options.length;i++){"
+            "  if(el.options[i].textContent.trim()==='%@'){"
+            "    el.value=el.options[i].value;"
+            "    el.dispatchEvent(new Event('change',{bubbles:true}));"
+            "    return JSON.stringify({ok:true,selected_value:el.options[i].value,"
+            "      selected_text:el.options[i].textContent.trim()})}}"
+            "return JSON.stringify({ok:false,error:'option not found'})",
+            escapedText];
+    } else {
+        NSString *escapedVal = [value stringByReplacingOccurrencesOfString:@"\\"
+                                                               withString:@"\\\\"];
+        escapedVal = [escapedVal stringByReplacingOccurrencesOfString:@"'"
+                                                          withString:@"\\'"];
+        [js appendFormat:
+            @"el.value='%@';"
+            "el.dispatchEvent(new Event('change',{bubbles:true}));"
+            "var opt=el.options[el.selectedIndex];"
+            "return JSON.stringify({ok:true,selected_value:el.value,"
+            "  selected_text:opt?opt.textContent.trim():''})",
+            escapedVal];
+    }
+
+    [js appendString:@"})()"];
+
+    __block NSDictionary *result = nil;
+    dispatch_sync(dispatch_get_main_queue(), ^{
+        WKWebView *wv = (__bridge WKWebView *)ui_get_active_webview(ctx->ui);
+        if (!wv) { result = @{@"ok": @NO, @"error": @"no active webview"}; return; }
+
+        __block BOOL done = NO;
+        __block NSDictionary *response = nil;
+
+        [wv evaluateJavaScript:js completionHandler:^(id res, NSError *error) {
+            if (error) {
+                response = @{@"ok": @NO, @"error": error.localizedDescription ?: @"unknown"};
+            } else if (res && [res isKindOfClass:[NSString class]]) {
+                NSData *data = [(NSString *)res dataUsingEncoding:NSUTF8StringEncoding];
+                response = [NSJSONSerialization JSONObjectWithData:data options:0 error:nil];
+            }
+            done = YES;
+        }];
+
+        NSDate *timeout = [NSDate dateWithTimeIntervalSinceNow:5.0];
+        while (!done && [[NSRunLoop currentRunLoop] runMode:NSDefaultRunLoopMode
+                                                beforeDate:timeout]) {
+            if ([timeout timeIntervalSinceNow] <= 0) break;
+        }
+
+        if (!done) result = @{@"ok": @NO, @"error": @"select timeout"};
+        else if (response) result = response;
+        else result = @{@"ok": @NO, @"error": @"select failed"};
+    });
+    return result ?: @{@"ok": @NO, @"error": @"select failed"};
+}
+
 static NSDictionary *do_sleep_step(NSDictionary *json) {
     NSNumber *ms = json[@"ms"];
     double seconds = ms ? [ms doubleValue] / 1000.0 : 0.1;
@@ -726,6 +960,36 @@ static void handle_click(int fd, HTTPRequest *req, ServeContext *ctx) {
     send_dict(fd, do_click(json, ctx));
 }
 
+static void handle_query(int fd, HTTPRequest *req, ServeContext *ctx) {
+    if (!req->body || req->body_len <= 0) {
+        send_json(fd, 400, "{\"error\":\"missing body\"}");
+        return;
+    }
+    NSData *data = [NSData dataWithBytes:req->body length:req->body_len];
+    NSDictionary *json = [NSJSONSerialization JSONObjectWithData:data options:0 error:nil];
+    send_dict(fd, do_query(json, ctx));
+}
+
+static void handle_tab(int fd, HTTPRequest *req, ServeContext *ctx) {
+    if (!req->body || req->body_len <= 0) {
+        send_json(fd, 400, "{\"error\":\"missing body\"}");
+        return;
+    }
+    NSData *data = [NSData dataWithBytes:req->body length:req->body_len];
+    NSDictionary *json = [NSJSONSerialization JSONObjectWithData:data options:0 error:nil];
+    send_dict(fd, do_tab(json, ctx));
+}
+
+static void handle_select(int fd, HTTPRequest *req, ServeContext *ctx) {
+    if (!req->body || req->body_len <= 0) {
+        send_json(fd, 400, "{\"error\":\"missing body\"}");
+        return;
+    }
+    NSData *data = [NSData dataWithBytes:req->body length:req->body_len];
+    NSDictionary *json = [NSJSONSerialization JSONObjectWithData:data options:0 error:nil];
+    send_dict(fd, do_select(json, ctx));
+}
+
 static void handle_batch(int fd, HTTPRequest *req, ServeContext *ctx) {
     if (!req->body || req->body_len <= 0) {
         send_json(fd, 400, "{\"error\":\"missing body\"}");
@@ -774,6 +1038,12 @@ static void handle_batch(int fd, HTTPRequest *req, ServeContext *ctx) {
             result = do_fill(step, ctx);
         } else if ([type isEqualToString:@"click"]) {
             result = do_click(step, ctx);
+        } else if ([type isEqualToString:@"query"]) {
+            result = do_query(step, ctx);
+        } else if ([type isEqualToString:@"tab"]) {
+            result = do_tab(step, ctx);
+        } else if ([type isEqualToString:@"select"]) {
+            result = do_select(step, ctx);
         } else if ([type isEqualToString:@"sleep"]) {
             result = do_sleep_step(step);
         } else {
@@ -831,6 +1101,12 @@ static void *server_thread(void *arg) {
             handle_fill(client_fd, &req, ctx);
         } else if (strcmp(req.method, "POST") == 0 && strcmp(req.path, "/click") == 0) {
             handle_click(client_fd, &req, ctx);
+        } else if (strcmp(req.method, "POST") == 0 && strcmp(req.path, "/query") == 0) {
+            handle_query(client_fd, &req, ctx);
+        } else if (strcmp(req.method, "POST") == 0 && strcmp(req.path, "/tab") == 0) {
+            handle_tab(client_fd, &req, ctx);
+        } else if (strcmp(req.method, "POST") == 0 && strcmp(req.path, "/select") == 0) {
+            handle_select(client_fd, &req, ctx);
         } else if (strcmp(req.method, "POST") == 0 && strcmp(req.path, "/batch") == 0) {
             handle_batch(client_fd, &req, ctx);
         } else {

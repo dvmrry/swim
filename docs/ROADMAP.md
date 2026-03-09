@@ -167,6 +167,19 @@ architecture is an asset — don't split until splitting solves a real problem.
 
 ---
 
+## Maturity Roadmap
+
+### Dialog Handling
+WebKit `WKUIDelegate` methods for alert/confirm/prompt. Auto-respond or queue
+for agent poll/response. Prevents JS dialogs from blocking the API.
+
+### Iframe Support
+Same-origin: inject JS that traverses `iframe.contentDocument`.
+Cross-origin: `WKUserScript` with `forMainFrameOnly:NO` + message passing.
+Enterprise apps (Oracle, SAP) are iframe-heavy — needed for full LOB coverage.
+
+---
+
 ## Non-Goals
 
 - Extension API compatibility (WebExtensions, Chrome extensions)
