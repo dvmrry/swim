@@ -1070,6 +1070,52 @@ static NSDictionary *do_storage(NSDictionary *json, ServeContext *ctx) {
     return result ?: @{@"ok": @NO, @"error": @"storage failed"};
 }
 
+static NSDictionary *do_hover(NSDictionary *json, ServeContext *ctx) {
+    NSString *selector = json[@"selector"];
+    if (!selector) return @{@"ok": @NO, @"error": @"missing selector"};
+
+    __block NSDictionary *result = nil;
+    dispatch_sync(dispatch_get_main_queue(), ^{
+        WKWebView *wv = (__bridge WKWebView *)ui_get_active_webview(ctx->ui);
+        if (!wv) { result = @{@"ok": @NO, @"error": @"no active webview"}; return; }
+
+        NSString *escaped = [selector stringByReplacingOccurrencesOfString:@"'"
+                                                               withString:@"\\'"];
+        NSString *js = [NSString stringWithFormat:
+            @"(function(){"
+            "var el=document.querySelector('%@');"
+            "if(!el)return JSON.stringify({ok:false,error:'element not found'});"
+            "el.dispatchEvent(new MouseEvent('mouseenter',{bubbles:true}));"
+            "el.dispatchEvent(new MouseEvent('mouseover',{bubbles:true}));"
+            "return JSON.stringify({ok:true})"
+            "})()", escaped];
+
+        __block BOOL done = NO;
+        __block NSDictionary *response = nil;
+
+        [wv evaluateJavaScript:js completionHandler:^(id res, NSError *error) {
+            if (error) {
+                response = @{@"ok": @NO, @"error": error.localizedDescription ?: @"unknown"};
+            } else if (res && [res isKindOfClass:[NSString class]]) {
+                NSData *data = [(NSString *)res dataUsingEncoding:NSUTF8StringEncoding];
+                response = [NSJSONSerialization JSONObjectWithData:data options:0 error:nil];
+            }
+            done = YES;
+        }];
+
+        NSDate *timeout = [NSDate dateWithTimeIntervalSinceNow:5.0];
+        while (!done && [[NSRunLoop currentRunLoop] runMode:NSDefaultRunLoopMode
+                                                beforeDate:timeout]) {
+            if ([timeout timeIntervalSinceNow] <= 0) break;
+        }
+
+        if (!done) result = @{@"ok": @NO, @"error": @"hover timeout"};
+        else if (response) result = response;
+        else result = @{@"ok": @NO, @"error": @"hover failed"};
+    });
+    return result ?: @{@"ok": @NO, @"error": @"hover failed"};
+}
+
 static NSDictionary *do_sleep_step(NSDictionary *json) {
     NSNumber *ms = json[@"ms"];
     double seconds = ms ? [ms doubleValue] / 1000.0 : 0.1;
@@ -1154,6 +1200,11 @@ static void handle_fill(int fd, HTTPRequest *req, ServeContext *ctx) {
 static void handle_click(int fd, HTTPRequest *req, ServeContext *ctx) {
     NSDictionary *json = parse_json_body(req->body, req->body_len);
     send_dict(fd, do_click(json, ctx));
+}
+
+static void handle_hover(int fd, HTTPRequest *req, ServeContext *ctx) {
+    NSDictionary *json = parse_json_body(req->body, req->body_len);
+    send_dict(fd, do_hover(json, ctx));
 }
 
 static void handle_query(int fd, HTTPRequest *req, ServeContext *ctx) {
@@ -1254,6 +1305,8 @@ static void handle_batch(int fd, HTTPRequest *req, ServeContext *ctx) {
             result = do_fill(step, ctx);
         } else if ([type isEqualToString:@"click"]) {
             result = do_click(step, ctx);
+        } else if ([type isEqualToString:@"hover"]) {
+            result = do_hover(step, ctx);
         } else if ([type isEqualToString:@"query"]) {
             result = do_query(step, ctx);
         } else if ([type isEqualToString:@"tab"]) {
@@ -1331,6 +1384,8 @@ static void *server_thread(void *arg) {
             handle_scroll(client_fd, &req, ctx);
         } else if (strcmp(req.method, "POST") == 0 && strcmp(req.path, "/storage") == 0) {
             handle_storage(client_fd, &req, ctx);
+        } else if (strcmp(req.method, "POST") == 0 && strcmp(req.path, "/hover") == 0) {
+            handle_hover(client_fd, &req, ctx);
         } else if (strcmp(req.method, "POST") == 0 && strcmp(req.path, "/batch") == 0) {
             handle_batch(client_fd, &req, ctx);
         } else {

@@ -277,13 +277,13 @@ static const char *kToolsList =
     "interact, fill (selector+value or fields[]), wait_for (selector|url_contains, timeout?), "
     "query (selector, attribute?, all?), tab (index), select (selector, text|value), "
     "scroll (selector), storage (type, action?, key?, value?), "
-    "execute (command), action (action, count?), state, click (selector|text), key (key)\","
+    "execute (command), action (action, count?), state, click (selector|text), hover (selector), key (key)\","
     "\"inputSchema\":{\"type\":\"object\","
     "\"properties\":{"
     "\"method\":{\"type\":\"string\",\"enum\":[\"navigate\",\"screenshot\",\"extract\","
     "\"interact\",\"fill\",\"wait_for\",\"query\",\"tab\",\"select\","
     "\"scroll\",\"storage\","
-    "\"execute\",\"action\",\"state\",\"click\",\"key\"],"
+    "\"execute\",\"action\",\"state\",\"click\",\"hover\",\"key\"],"
     "\"description\":\"The operation to perform\"},"
     "\"url\":{\"type\":\"string\",\"description\":\"URL to navigate to (navigate)\"},"
     "\"command\":{\"type\":\"string\",\"description\":\"Command to run (execute)\"},"
@@ -623,6 +623,18 @@ static char *handle_tool_call(const char *name, const char *arguments) {
         }
         free(selector); free(text);
         char *resp = http_post("/click", body);
+        return resp ? resp : strdup("{\"error\":\"connection failed\"}");
+    }
+
+    if (strcmp(name, "hover") == 0) {
+        char *selector = json_get_string(arguments, "selector");
+        if (!selector) return strdup("{\"error\":\"missing selector\"}");
+        char *escaped = json_escape(selector);
+        char body[4096];
+        snprintf(body, sizeof(body), "{\"selector\":\"%s\"}", escaped);
+        free(escaped);
+        free(selector);
+        char *resp = http_post("/hover", body);
         return resp ? resp : strdup("{\"error\":\"connection failed\"}");
     }
 
