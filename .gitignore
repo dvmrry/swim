@@ -6,4 +6,5 @@ swim.app/
 .DS_Store
 result
 extract_js.inc
+interact_js.inc
 test-screenshots/

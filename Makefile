@@ -9,7 +9,7 @@ HEADERS = browser.h input.h commands.h ui.h storage.h config.h userscript.h them
 
 all: swim swim-mcp
 
-swim: $(SRC) $(HEADERS) focus_js.inc extract_js.inc Info.plist
+swim: $(SRC) $(HEADERS) focus_js.inc extract_js.inc interact_js.inc Info.plist
 	$(CC) $(CFLAGS) $(FRAMEWORKS) -sectcreate __TEXT __info_plist Info.plist $(SRC) -o swim
 
 swim-mcp: swim-mcp.c
@@ -24,7 +24,11 @@ extract_js.inc: js/extract.js
 	@echo "Generating extract_js.inc"
 	@sed 's/\\/\\\\/g; s/"/\\"/g; s/^/"/; s/$$/\\n"/' js/extract.js > extract_js.inc
 
+interact_js.inc: js/interact.js
+	@echo "Generating interact_js.inc"
+	@sed 's/\\/\\\\/g; s/"/\\"/g; s/^/"/; s/$$/\\n"/' js/interact.js > interact_js.inc
+
 clean:
-	rm -f swim swim-mcp focus_js.inc extract_js.inc
+	rm -f swim swim-mcp focus_js.inc extract_js.inc interact_js.inc
 
 .PHONY: clean all
