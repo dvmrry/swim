@@ -7,8 +7,13 @@ SRC_M = main.m ui.m serve.m
 SRC = $(SRC_C) $(SRC_M)
 HEADERS = browser.h input.h commands.h ui.h storage.h config.h userscript.h theme.h focus.h serve.h
 
+all: swim swim-mcp
+
 swim: $(SRC) $(HEADERS) focus_js.inc extract_js.inc Info.plist
 	$(CC) $(CFLAGS) $(FRAMEWORKS) -sectcreate __TEXT __info_plist Info.plist $(SRC) -o swim
+
+swim-mcp: swim-mcp.c
+	$(CC) -Wall -Wextra -Wpedantic -std=c17 swim-mcp.c -o swim-mcp
 
 # Convert focus.js to a C string literal for embedding
 focus_js.inc: js/focus.js
@@ -22,4 +27,4 @@ extract_js.inc: js/extract.js
 clean:
 	rm -f swim swim-mcp focus_js.inc extract_js.inc
 
-.PHONY: clean
+.PHONY: clean all
