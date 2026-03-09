@@ -273,19 +273,19 @@ static void send_mcp_error(const char *id_str, int id_int, bool id_is_string,
 static const char *kToolsList =
     "{\"tools\":["
     "{\"name\":\"swim\","
-    "\"description\":\"Control the swim browser. Methods: navigate (url), screenshot, extract, "
-    "navigate_back, navigate_forward, "
+    "\"description\":\"Control the swim browser. Methods: navigate (url), screenshot, pdf, extract, "
+    "navigate_back, navigate_forward, eval (js), "
     "interact, fill (selector+value or fields[]), wait_for (selector|url_contains, timeout?), "
-    "query (selector, attribute?, all?), tab (index), select (selector, text|value), "
+    "console, query (selector, attribute?, all?), tab (index), select (selector, text|value), "
     "scroll (selector), storage (type, action?, key?, value?), "
     "execute (command), action (action, count?), state, click (selector|text), hover (selector), key (key)\","
     "\"inputSchema\":{\"type\":\"object\","
     "\"properties\":{"
     "\"method\":{\"type\":\"string\",\"enum\":[\"navigate\",\"navigate_back\",\"navigate_forward\","
-    "\"screenshot\",\"extract\","
-    "\"interact\",\"fill\",\"wait_for\",\"query\",\"tab\",\"select\","
+    "\"screenshot\",\"pdf\",\"extract\","
+    "\"interact\",\"fill\",\"wait_for\",\"console\",\"query\",\"tab\",\"select\","
     "\"scroll\",\"storage\","
-    "\"execute\",\"action\",\"state\",\"click\",\"hover\",\"key\"],"
+    "\"execute\",\"action\",\"state\",\"click\",\"hover\",\"key\",\"eval\"],"
     "\"description\":\"The operation to perform\"},"
     "\"url\":{\"type\":\"string\",\"description\":\"URL to navigate to (navigate)\"},"
     "\"command\":{\"type\":\"string\",\"description\":\"Command to run (execute)\"},"
@@ -294,6 +294,7 @@ static const char *kToolsList =
     "\"selector\":{\"type\":\"string\",\"description\":\"CSS selector (click, fill, wait_for, query, select)\"},"
     "\"text\":{\"type\":\"string\",\"description\":\"Text to match (click) or option text (select)\"},"
     "\"key\":{\"type\":\"string\",\"description\":\"Key to send (key)\"},"
+    "\"js\":{\"type\":\"string\",\"description\":\"JavaScript to evaluate in page (eval)\"},"
     "\"value\":{\"type\":\"string\",\"description\":\"Value to set (fill, select)\"},"
     "\"fields\":{\"type\":\"array\",\"description\":\"Array of {selector,value} pairs (fill)\","
     "\"items\":{\"type\":\"object\",\"properties\":{"
@@ -370,6 +371,23 @@ static char *handle_tool_call(const char *name, const char *arguments) {
         return resp;
     }
 
+    if (strcmp(name, "pdf") == 0) {
+        int len = 0;
+        char *raw = http_get_raw("/pdf", &len);
+        if (!raw || len <= 0) {
+            free(raw);
+            return strdup("{\"error\":\"pdf failed\"}");
+        }
+        char *b64 = base64_encode((unsigned char *)raw, len);
+        free(raw);
+        int resp_size = (int)strlen(b64) + 256;
+        char *resp = malloc(resp_size);
+        snprintf(resp, resp_size,
+            "{\"type\":\"resource\",\"data\":\"%s\",\"mimeType\":\"application/pdf\"}", b64);
+        free(b64);
+        return resp;
+    }
+
     if (strcmp(name, "extract") == 0) {
         char *resp = http_get("/extract");
         return resp ? resp : strdup("{\"error\":\"connection failed\"}");
@@ -377,6 +395,11 @@ static char *handle_tool_call(const char *name, const char *arguments) {
 
     if (strcmp(name, "interact") == 0) {
         char *resp = http_get("/interact");
+        return resp ? resp : strdup("{\"error\":\"connection failed\"}");
+    }
+
+    if (strcmp(name, "console") == 0) {
+        char *resp = http_get("/console");
         return resp ? resp : strdup("{\"error\":\"connection failed\"}");
     }
 

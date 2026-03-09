@@ -1116,6 +1116,65 @@ static NSDictionary *do_hover(NSDictionary *json, ServeContext *ctx) {
     return result ?: @{@"ok": @NO, @"error": @"hover failed"};
 }
 
+static NSDictionary *do_console(ServeContext *ctx) {
+    __block NSDictionary *result = nil;
+    dispatch_sync(dispatch_get_main_queue(), ^{
+        WKWebView *wv = (__bridge WKWebView *)ui_get_active_webview(ctx->ui);
+        if (!wv) { result = @{@"ok": @NO, @"error": @"no active webview"}; return; }
+
+        __block NSDictionary *response = nil;
+        __block BOOL done = NO;
+
+        NSString *js = @"(function(){"
+            "if(!window.__swim_console){"
+            "  window.__swim_console=[];"
+            "  var orig={log:console.log,warn:console.warn,error:console.error,info:console.info};"
+            "  ['log','warn','error','info'].forEach(function(level){"
+            "    console[level]=function(){"
+            "      var args=[].slice.call(arguments).map(function(a){"
+            "        try{return typeof a==='object'?JSON.stringify(a):String(a)}"
+            "        catch(e){return String(a)}"
+            "      });"
+            "      window.__swim_console.push({level:level,text:args.join(' '),ts:Date.now()});"
+            "      if(window.__swim_console.length>200)window.__swim_console.shift();"
+            "      orig[level].apply(console,arguments)"
+            "    }"
+            "  })"
+            "}"
+            "var msgs=window.__swim_console.splice(0);"
+            "return JSON.stringify({ok:true,messages:msgs,count:msgs.length})"
+            "})()";
+
+        [wv evaluateJavaScript:js completionHandler:^(id res, NSError *error) {
+            if (error) {
+                response = @{@"ok": @NO, @"error": error.localizedDescription ?: @"unknown"};
+            } else if (res && [res isKindOfClass:[NSString class]]) {
+                NSData *data = [(NSString *)res dataUsingEncoding:NSUTF8StringEncoding];
+                NSDictionary *parsed = [NSJSONSerialization JSONObjectWithData:data options:0 error:nil];
+                if (parsed) {
+                    response = parsed;
+                } else {
+                    response = @{@"ok": @NO, @"error": @"parse failed"};
+                }
+            } else {
+                response = @{@"ok": @NO, @"error": @"no result"};
+            }
+            done = YES;
+        }];
+
+        NSDate *timeout = [NSDate dateWithTimeIntervalSinceNow:5.0];
+        while (!done && [[NSRunLoop currentRunLoop] runMode:NSDefaultRunLoopMode
+                                                beforeDate:timeout]) {
+            if ([timeout timeIntervalSinceNow] <= 0) break;
+        }
+
+        if (!done) result = @{@"ok": @NO, @"error": @"console timeout"};
+        else if (response) result = response;
+        else result = @{@"ok": @NO, @"error": @"console failed"};
+    });
+    return result ?: @{@"ok": @NO, @"error": @"console failed"};
+}
+
 static NSDictionary *do_sleep_step(NSDictionary *json) {
     NSNumber *ms = json[@"ms"];
     double seconds = ms ? [ms doubleValue] / 1000.0 : 0.1;
@@ -1160,6 +1219,35 @@ static void handle_screenshot(int fd, ServeContext *ctx) {
     }
 }
 
+static void handle_pdf(int fd, ServeContext *ctx) {
+    __block NSData *pdfData = nil;
+    dispatch_sync(dispatch_get_main_queue(), ^{
+        WKWebView *wv = (__bridge WKWebView *)ui_get_active_webview(ctx->ui);
+        if (!wv) return;
+
+        __block BOOL done = NO;
+        WKPDFConfiguration *config = [[WKPDFConfiguration alloc] init];
+
+        [wv createPDFWithConfiguration:config completionHandler:^(NSData *data, NSError *error) {
+            (void)error;
+            if (data) pdfData = data;
+            done = YES;
+        }];
+
+        NSDate *timeout = [NSDate dateWithTimeIntervalSinceNow:10.0];
+        while (!done && [[NSRunLoop currentRunLoop] runMode:NSDefaultRunLoopMode
+                                                 beforeDate:timeout]) {
+            if ([timeout timeIntervalSinceNow] <= 0) break;
+        }
+    });
+
+    if (pdfData) {
+        send_response(fd, 200, "application/pdf", [pdfData bytes], (int)[pdfData length]);
+    } else {
+        send_json(fd, 500, "{\"error\":\"pdf generation failed\"}");
+    }
+}
+
 static void handle_state(int fd, ServeContext *ctx) {
     send_dict(fd, do_state(ctx));
 }
@@ -1185,6 +1273,10 @@ static void handle_extract(int fd, ServeContext *ctx) {
 
 static void handle_interact(int fd, ServeContext *ctx) {
     send_dict(fd, do_interact(ctx));
+}
+
+static void handle_console(int fd, ServeContext *ctx) {
+    send_dict(fd, do_console(ctx));
 }
 
 static void handle_eval(int fd, HTTPRequest *req, ServeContext *ctx) {
@@ -1301,6 +1393,8 @@ static void handle_batch(int fd, HTTPRequest *req, ServeContext *ctx) {
             result = do_extract(ctx);
         } else if ([type isEqualToString:@"interact"]) {
             result = do_interact(ctx);
+        } else if ([type isEqualToString:@"console"]) {
+            result = do_console(ctx);
         } else if ([type isEqualToString:@"fill"]) {
             result = do_fill(step, ctx);
         } else if ([type isEqualToString:@"click"]) {
@@ -1356,6 +1450,8 @@ static void *server_thread(void *arg) {
             handle_key(client_fd, &req, ctx);
         } else if (strcmp(req.method, "GET") == 0 && strcmp(req.path, "/screenshot") == 0) {
             handle_screenshot(client_fd, ctx);
+        } else if (strcmp(req.method, "GET") == 0 && strcmp(req.path, "/pdf") == 0) {
+            handle_pdf(client_fd, ctx);
         } else if (strcmp(req.method, "GET") == 0 && strcmp(req.path, "/state") == 0) {
             handle_state(client_fd, ctx);
         } else if (strcmp(req.method, "POST") == 0 && strcmp(req.path, "/resize") == 0) {
@@ -1370,6 +1466,8 @@ static void *server_thread(void *arg) {
             handle_extract(client_fd, ctx);
         } else if (strcmp(req.method, "GET") == 0 && strcmp(req.path, "/interact") == 0) {
             handle_interact(client_fd, ctx);
+        } else if (strcmp(req.method, "GET") == 0 && strcmp(req.path, "/console") == 0) {
+            handle_console(client_fd, ctx);
         } else if (strcmp(req.method, "POST") == 0 && strcmp(req.path, "/fill") == 0) {
             handle_fill(client_fd, &req, ctx);
         } else if (strcmp(req.method, "POST") == 0 && strcmp(req.path, "/click") == 0) {
