@@ -178,6 +178,24 @@ Same-origin: inject JS that traverses `iframe.contentDocument`.
 Cross-origin: `WKUserScript` with `forMainFrameOnly:NO` + message passing.
 Enterprise apps (Oracle, SAP) are iframe-heavy — needed for full LOB coverage.
 
+### File Upload
+WKWebView file input handling. Requires native file picker bypass —
+set file input value programmatically or use `WKOpenPanelParameters` delegate.
+
+### Network Request Inspection
+WKWebView doesn't expose network layer. Options: custom URL protocol handler
+(`WKURLSchemeHandler`), or inject `fetch`/`XMLHttpRequest` wrapper JS.
+Highest complexity of remaining features.
+
+### Drag and Drop
+Mouse event sequence: mousedown → mousemove → mouseup. Needs coordinate
+calculation from element bounding rects. Medium effort.
+
+### JS-Heavy Page Extraction
+`/extract` returns empty on SPAs that render via JS (React, Vue, GitHub).
+Options: wait for idle, use innerText instead of readability heuristics,
+or fall back to accessibility tree approach.
+
 ---
 
 ## Non-Goals

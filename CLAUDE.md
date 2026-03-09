@@ -26,7 +26,7 @@ make clean  # removes binary
 swim --serve 9111    # start with HTTP API on port 9111
 ```
 
-Endpoints: /health, /state, /screenshot, /extract, /interact, /click, /fill, /select, /query, /scroll, /storage, /tab, /wait, /wait_for, /action, /command, /key, /eval, /batch, /resize
+Endpoints: /health, /state, /screenshot, /pdf, /extract, /interact, /click, /hover, /fill, /select, /query, /scroll, /storage, /console, /tab, /wait, /wait_for, /action, /command, /key, /eval, /batch, /resize
 
 ## MCP Integration
 
@@ -34,7 +34,7 @@ Endpoints: /health, /state, /screenshot, /extract, /interact, /click, /fill, /se
 swim-mcp --port 9111  # MCP sidecar (add to Claude Code mcp.json)
 ```
 
-Tools: navigate, screenshot, extract, interact, fill, select, query, scroll, storage, tab, wait_for, execute, action, state, click, key
+Tools: navigate, screenshot, extract, interact, fill, select, query, scroll, storage, tab, wait_for, execute, action, state, click, key, hover, console, navigate_back, navigate_forward, pdf, eval
 
 ## Conventions
 
