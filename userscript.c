@@ -331,6 +331,9 @@ int userscript_load_dir(UserScriptManager *m, const char *dir_path) {
         char *source = read_file(path);
         if (!source) continue;
 
+        /* skip internal scripts (SwimScript header) — they are invoked on demand */
+        if (strstr(source, "// ==SwimScript==")) { free(source); continue; }
+
         UserScript *script = &m->scripts[m->count];
         memset(script, 0, sizeof(*script));
         parse_header(script, source);
@@ -361,11 +364,11 @@ bool userscript_create_defaults(const char *dir_path) {
     for (char *p = tmp + 1; *p; p++) {
         if (*p == '/') {
             *p = '\0';
-            mkdir(tmp, 0755);
+            mkdir(tmp, 0700);
             *p = '/';
         }
     }
-    if (mkdir(tmp, 0755) != 0 && stat(tmp, &st) != 0) return false;
+    if (mkdir(tmp, 0700) != 0 && stat(tmp, &st) != 0) return false;
 
     /* write old-reddit.js */
     char path[1024];

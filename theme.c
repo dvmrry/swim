@@ -117,11 +117,11 @@ void theme_create_defaults(const char *dir_path) {
     for (char *p = tmp + 1; *p; p++) {
         if (*p == '/') {
             *p = '\0';
-            mkdir(tmp, 0755);
+            mkdir(tmp, 0700);
             *p = '/';
         }
     }
-    mkdir(tmp, 0755);
+    mkdir(tmp, 0700);
 
     char path[1024];
 

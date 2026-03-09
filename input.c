@@ -18,8 +18,11 @@ static TrieNode *node_find_child(TrieNode *n, char key) {
 
 static TrieNode *node_add_child(TrieNode *n, char key) {
     if (n->child_count >= n->child_capacity) {
-        n->child_capacity = n->child_capacity ? n->child_capacity * 2 : 4;
-        n->children = realloc(n->children, n->child_capacity * sizeof(TrieNode));
+        int new_cap = n->child_capacity ? n->child_capacity * 2 : 4;
+        TrieNode *tmp = realloc(n->children, new_cap * sizeof(TrieNode));
+        if (!tmp) return NULL;
+        n->children = tmp;
+        n->child_capacity = new_cap;
     }
     TrieNode *child = &n->children[n->child_count++];
     node_init(child);
@@ -45,6 +48,7 @@ void keytrie_bind(KeyTrie *t, const char *keys, const char *action) {
         TrieNode *child = node_find_child(node, keys[i]);
         if (!child) {
             child = node_add_child(node, keys[i]);
+            if (!child) return;
         }
         node = child;
     }
@@ -109,6 +113,9 @@ void mode_init(ModeManager *m, ActionFn on_action, void *ctx) {
     keytrie_bind(&m->normal_keys, "gt", "goto-tab");
     keytrie_bind(&m->normal_keys, "<<", "move-tab-left");
     keytrie_bind(&m->normal_keys, ">>", "move-tab-right");
+    keytrie_bind(&m->normal_keys, ";y", "hint-yank");
+    keytrie_bind(&m->normal_keys, "gu", "navigate-up");
+    keytrie_bind(&m->normal_keys, "gU", "navigate-root");
 }
 
 void mode_set(ModeManager *m, Mode mode) {

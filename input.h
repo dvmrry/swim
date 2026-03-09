@@ -40,6 +40,8 @@ typedef struct ModeManager {
     Mode mode;
     char pending_keys[32];
     int pending_len;
+    int count;              // count prefix (e.g., 5 in 5j), 0 = no count
+    char last_action[64];   // for . repeat
     KeyTrie normal_keys;
     ActionFn on_action;
     void *action_ctx;

@@ -13,16 +13,40 @@ void storage_ensure_dir(void) {
 
     char path[512];
     snprintf(path, sizeof(path), "%s/.config", home);
-    mkdir(path, 0755);
+    mkdir(path, 0700);
     snprintf(path, sizeof(path), "%s/.config/swim", home);
-    mkdir(path, 0755);
+    mkdir(path, 0700);
 }
 
 void storage_init(Storage *s, const char *filepath) {
     memset(s, 0, sizeof(*s));
     s->capacity = INITIAL_CAP;
     s->entries = calloc(INITIAL_CAP, sizeof(StorageEntry));
+    if (!s->entries) { s->capacity = 0; return; }
     snprintf(s->filepath, sizeof(s->filepath), "%s", filepath);
+}
+
+// Escape a string for JSON: quotes, backslashes, and control characters
+static int json_escape(const char *src, char *dst, int dst_size) {
+    int j = 0;
+    for (int k = 0; src[k] && j < dst_size - 6; k++) {
+        unsigned char c = (unsigned char)src[k];
+        if (c == '"' || c == '\\') {
+            dst[j++] = '\\'; dst[j++] = c;
+        } else if (c == '\n') {
+            dst[j++] = '\\'; dst[j++] = 'n';
+        } else if (c == '\r') {
+            dst[j++] = '\\'; dst[j++] = 'r';
+        } else if (c == '\t') {
+            dst[j++] = '\\'; dst[j++] = 't';
+        } else if (c < 0x20) {
+            j += snprintf(dst + j, dst_size - j, "\\u%04x", c);
+        } else {
+            dst[j++] = c;
+        }
+    }
+    dst[j] = '\0';
+    return j;
 }
 
 // Simple JSON writing — no dependency needed for this format
@@ -33,19 +57,14 @@ void storage_save(Storage *s) {
     fprintf(f, "[\n");
     for (int i = 0; i < s->count; i++) {
         StorageEntry *e = &s->entries[i];
-        // Escape quotes in title
+        char escaped_url[4096];
+        json_escape(e->url, escaped_url, sizeof(escaped_url));
+
         char escaped_title[512];
-        int j = 0;
-        for (int k = 0; e->title[k] && j < 510; k++) {
-            if (e->title[k] == '"' || e->title[k] == '\\') {
-                escaped_title[j++] = '\\';
-            }
-            escaped_title[j++] = e->title[k];
-        }
-        escaped_title[j] = '\0';
+        json_escape(e->title, escaped_title, sizeof(escaped_title));
 
         fprintf(f, "  {\"url\":\"%s\",\"title\":\"%s\",\"time\":%ld}%s\n",
-            e->url, escaped_title, e->timestamp,
+            escaped_url, escaped_title, e->timestamp,
             (i < s->count - 1) ? "," : "");
     }
     fprintf(f, "]\n");
@@ -62,6 +81,7 @@ void storage_load(Storage *s) {
     fseek(f, 0, SEEK_SET);
 
     char *buf = malloc(len + 1);
+    if (!buf) { fclose(f); return; }
     fread(buf, 1, len, f);
     buf[len] = '\0';
     fclose(f);
@@ -70,19 +90,23 @@ void storage_load(Storage *s) {
     char *p = buf;
     while ((p = strstr(p, "\"url\":\""))) {
         if (s->count >= s->capacity) {
-            s->capacity *= 2;
-            if (s->capacity > MAX_ENTRIES) s->capacity = MAX_ENTRIES;
-            s->entries = realloc(s->entries, s->capacity * sizeof(StorageEntry));
+            int new_cap = s->capacity * 2;
+            if (new_cap > MAX_ENTRIES) new_cap = MAX_ENTRIES;
+            StorageEntry *tmp = realloc(s->entries, new_cap * sizeof(StorageEntry));
+            if (!tmp) break;
+            s->entries = tmp;
+            s->capacity = new_cap;
         }
         if (s->count >= MAX_ENTRIES) break;
 
         StorageEntry *e = &s->entries[s->count];
         memset(e, 0, sizeof(*e));
 
-        // Extract URL
+        // Extract URL (unescape \" and \\)
         p += 7;  // skip "url":"
         int i = 0;
         while (*p && *p != '"' && i < 2047) {
+            if (*p == '\\' && *(p+1)) p++;
             e->url[i++] = *p++;
         }
         e->url[i] = '\0';
@@ -131,8 +155,11 @@ void storage_add(Storage *s, const char *url, const char *title) {
             memmove(&s->entries[0], &s->entries[1], (s->count - 1) * sizeof(StorageEntry));
             s->count--;
         } else {
-            s->capacity *= 2;
-            s->entries = realloc(s->entries, s->capacity * sizeof(StorageEntry));
+            int new_cap = s->capacity * 2;
+            StorageEntry *tmp = realloc(s->entries, new_cap * sizeof(StorageEntry));
+            if (!tmp) return;
+            s->entries = tmp;
+            s->capacity = new_cap;
         }
     }
 
@@ -176,7 +203,9 @@ void session_save(const char *filepath, const char **urls, int count) {
     if (!f) return;
     fprintf(f, "[\n");
     for (int i = 0; i < count; i++) {
-        fprintf(f, "  \"%s\"%s\n", urls[i], (i < count - 1) ? "," : "");
+        char escaped[4096];
+        json_escape(urls[i], escaped, sizeof(escaped));
+        fprintf(f, "  \"%s\"%s\n", escaped, (i < count - 1) ? "," : "");
     }
     fprintf(f, "]\n");
     fclose(f);
@@ -191,6 +220,7 @@ int session_load(const char *filepath, char urls[][2048], int max_urls) {
     fseek(f, 0, SEEK_SET);
 
     char *buf = malloc(len + 1);
+    if (!buf) { fclose(f); return 0; }
     fread(buf, 1, len, f);
     buf[len] = '\0';
     fclose(f);

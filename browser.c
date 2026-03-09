@@ -9,16 +9,21 @@ void browser_init(Browser *b) {
     memset(b, 0, sizeof(*b));
     b->tab_capacity = INITIAL_CAP;
     b->tabs = calloc(INITIAL_CAP, sizeof(Tab));
+    if (!b->tabs) { b->tab_capacity = 0; return; }
     b->closed_capacity = INITIAL_CAP;
     b->closed_urls = calloc(INITIAL_CAP, sizeof(char *));
+    if (!b->closed_urls) { b->closed_capacity = 0; }
     b->active_tab = -1;
     b->next_id = 1;
 }
 
 int browser_add_tab(Browser *b, const char *url) {
     if (b->tab_count >= b->tab_capacity) {
-        b->tab_capacity *= 2;
-        b->tabs = realloc(b->tabs, b->tab_capacity * sizeof(Tab));
+        int new_cap = b->tab_capacity * 2;
+        Tab *tmp = realloc(b->tabs, new_cap * sizeof(Tab));
+        if (!tmp) return -1;
+        b->tabs = tmp;
+        b->tab_capacity = new_cap;
     }
     Tab *t = &b->tabs[b->tab_count];
     memset(t, 0, sizeof(Tab));
@@ -36,12 +41,18 @@ void browser_close_tab(Browser *b, int index) {
 
     // Push URL to closed stack
     Tab *t = &b->tabs[index];
-    if (t->url[0]) {
+    if (t->url[0] && b->closed_urls) {
+        bool can_push = true;
         if (b->closed_count >= b->closed_capacity) {
-            b->closed_capacity *= 2;
-            b->closed_urls = realloc(b->closed_urls, b->closed_capacity * sizeof(char *));
+            int new_cap = b->closed_capacity * 2;
+            char **tmp = realloc(b->closed_urls, new_cap * sizeof(char *));
+            if (tmp) { b->closed_urls = tmp; b->closed_capacity = new_cap; }
+            else can_push = false;
         }
-        b->closed_urls[b->closed_count++] = strdup(t->url);
+        if (can_push) {
+            char *dup = strdup(t->url);
+            if (dup) b->closed_urls[b->closed_count++] = dup;
+        }
     }
 
     // Shift remaining tabs

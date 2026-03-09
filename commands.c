@@ -9,14 +9,18 @@ void registry_init(CommandRegistry *r, void *ctx) {
     memset(r, 0, sizeof(*r));
     r->capacity = INITIAL_CAP;
     r->commands = calloc(INITIAL_CAP, sizeof(Command));
+    if (!r->commands) { r->capacity = 0; return; }
     r->ctx = ctx;
 }
 
 void registry_add(CommandRegistry *r, const char *name, const char *alias,
                   CommandFn fn, const char *description) {
     if (r->count >= r->capacity) {
-        r->capacity *= 2;
-        r->commands = realloc(r->commands, r->capacity * sizeof(Command));
+        int new_cap = r->capacity * 2;
+        Command *tmp = realloc(r->commands, new_cap * sizeof(Command));
+        if (!tmp) return;
+        r->commands = tmp;
+        r->capacity = new_cap;
     }
     Command *c = &r->commands[r->count++];
     c->name = strdup(name);

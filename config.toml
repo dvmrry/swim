@@ -5,8 +5,8 @@ restore_session = true
 
 [appearance]
 font_size = 12
-show_tab_bar = true
-show_status_bar = true
+tab_bar = "auto"
+status_bar = "always"
 theme = "dark"
 
 [adblock]
