@@ -226,49 +226,22 @@ static void send_mcp_error(const char *id_str, int id_int, bool id_is_string,
 
 static const char *kToolsList =
     "{\"tools\":["
-    "{\"name\":\"navigate\","
-    "\"description\":\"Navigate to a URL in the active tab\","
-    "\"inputSchema\":{\"type\":\"object\","
-    "\"properties\":{\"url\":{\"type\":\"string\",\"description\":\"URL to navigate to\"}},"
-    "\"required\":[\"url\"]}},"
-
-    "{\"name\":\"screenshot\","
-    "\"description\":\"Capture a PNG screenshot of the current page\","
-    "\"inputSchema\":{\"type\":\"object\",\"properties\":{}}},"
-
-    "{\"name\":\"extract\","
-    "\"description\":\"Extract page content as markdown with links and metadata\","
-    "\"inputSchema\":{\"type\":\"object\",\"properties\":{}}},"
-
-    "{\"name\":\"execute\","
-    "\"description\":\"Run a swim command (e.g. 'tabopen url', 'bookmark', 'session save name')\","
-    "\"inputSchema\":{\"type\":\"object\","
-    "\"properties\":{\"command\":{\"type\":\"string\",\"description\":\"Command to execute\"}},"
-    "\"required\":[\"command\"]}},"
-
-    "{\"name\":\"action\","
-    "\"description\":\"Trigger a keybinding action (e.g. 'scroll-down', 'hint-follow', 'reload')\","
-    "\"inputSchema\":{\"type\":\"object\","
-    "\"properties\":{\"action\":{\"type\":\"string\",\"description\":\"Action name\"},"
-    "\"count\":{\"type\":\"integer\",\"description\":\"Repeat count\"}},"
-    "\"required\":[\"action\"]}},"
-
-    "{\"name\":\"state\","
-    "\"description\":\"Get browser state: mode, URL, title, tab list\","
-    "\"inputSchema\":{\"type\":\"object\",\"properties\":{}}},"
-
-    "{\"name\":\"click\","
-    "\"description\":\"Click an element by CSS selector or text content\","
+    "{\"name\":\"swim\","
+    "\"description\":\"Control the swim browser. Methods: navigate (url), screenshot, extract, "
+    "execute (command), action (action, count?), state, click (selector|text), key (key)\","
     "\"inputSchema\":{\"type\":\"object\","
     "\"properties\":{"
-    "\"selector\":{\"type\":\"string\",\"description\":\"CSS selector\"},"
-    "\"text\":{\"type\":\"string\",\"description\":\"Text content to match\"}}}},"
-
-    "{\"name\":\"key\","
-    "\"description\":\"Send a keypress (e.g. 'j', 'Escape', 'Ctrl-D')\","
-    "\"inputSchema\":{\"type\":\"object\","
-    "\"properties\":{\"key\":{\"type\":\"string\",\"description\":\"Key to send\"}},"
-    "\"required\":[\"key\"]}}"
+    "\"method\":{\"type\":\"string\",\"enum\":[\"navigate\",\"screenshot\",\"extract\","
+    "\"execute\",\"action\",\"state\",\"click\",\"key\"],"
+    "\"description\":\"The operation to perform\"},"
+    "\"url\":{\"type\":\"string\",\"description\":\"URL to navigate to (navigate)\"},"
+    "\"command\":{\"type\":\"string\",\"description\":\"Command to run (execute)\"},"
+    "\"action\":{\"type\":\"string\",\"description\":\"Action name (action)\"},"
+    "\"count\":{\"type\":\"integer\",\"description\":\"Repeat count (action)\"},"
+    "\"selector\":{\"type\":\"string\",\"description\":\"CSS selector (click)\"},"
+    "\"text\":{\"type\":\"string\",\"description\":\"Text content to match (click)\"},"
+    "\"key\":{\"type\":\"string\",\"description\":\"Key to send (key)\"}},"
+    "\"required\":[\"method\"]}}"
     "]}";
 
 // --- Tool Call Handlers ---
@@ -476,8 +449,20 @@ int main(int argc, char *argv[]) {
             if (!name) {
                 send_mcp_error(id_str, id_int, id_is_string,
                     -32602, "missing tool name");
+            } else if (strcmp(name, "swim") != 0) {
+                send_mcp_error(id_str, id_int, id_is_string,
+                    -32602, "unknown tool");
             } else {
-                char *result = handle_tool_call(name, arguments ? arguments : "{}");
+                // Single tool: extract method from arguments
+                char *tool_method = arguments ? json_get_string(arguments, "method") : NULL;
+                if (!tool_method) {
+                    send_mcp_error(id_str, id_int, id_is_string,
+                        -32602, "missing method parameter");
+                    free(params); free(name); free(arguments);
+                    free(method); free(id_str); free(msg);
+                    continue;
+                }
+                char *result = handle_tool_call(tool_method, arguments ? arguments : "{}");
 
                 // Check if this is a screenshot (image content type)
                 bool is_image = (strstr(result, "\"type\":\"image\"") != NULL);
@@ -503,6 +488,7 @@ int main(int argc, char *argv[]) {
                     free(response);
                 }
                 free(result);
+                free(tool_method);
             }
 
             free(params);
