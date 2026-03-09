@@ -383,7 +383,7 @@ static char *handle_tool_call(const char *name, const char *arguments) {
         int resp_size = (int)strlen(b64) + 256;
         char *resp = malloc(resp_size);
         snprintf(resp, resp_size,
-            "{\"type\":\"resource\",\"data\":\"%s\",\"mimeType\":\"application/pdf\"}", b64);
+            "{\"ok\":true,\"format\":\"base64\",\"mimeType\":\"application/pdf\",\"size\":%d,\"data\":\"%s\"}", len, b64);
         free(b64);
         return resp;
     }
