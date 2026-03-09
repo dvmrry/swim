@@ -393,6 +393,65 @@ static NSDictionary *do_extract(ServeContext *ctx) {
     return result ?: @{@"ok": @NO, @"error": @"extract failed"};
 }
 
+static NSDictionary *do_click(NSDictionary *json, ServeContext *ctx) {
+    NSString *selector = json[@"selector"];
+    NSString *text = json[@"text"];
+    if (!selector && !text) return @{@"ok": @NO, @"error": @"missing selector or text"};
+
+    __block NSDictionary *result = nil;
+    dispatch_sync(dispatch_get_main_queue(), ^{
+        WKWebView *wv = (__bridge WKWebView *)ui_get_active_webview(ctx->ui);
+        if (!wv) { result = @{@"ok": @NO, @"error": @"no active webview"}; return; }
+
+        NSString *js;
+        if (selector) {
+            NSString *escaped = [selector stringByReplacingOccurrencesOfString:@"'"
+                                                                   withString:@"\\'"];
+            js = [NSString stringWithFormat:
+                @"(function(){"
+                "var el=document.querySelector('%@');"
+                "if(!el)return JSON.stringify({ok:false,error:'element not found'});"
+                "el.click();return JSON.stringify({ok:true})"
+                "})()", escaped];
+        } else {
+            NSString *escaped = [text stringByReplacingOccurrencesOfString:@"'"
+                                                               withString:@"\\'"];
+            js = [NSString stringWithFormat:
+                @"(function(){"
+                "var els=document.querySelectorAll('a,button,input,[role=button],[onclick]');"
+                "for(var i=0;i<els.length;i++){"
+                "  if(els[i].textContent.trim().indexOf('%@')!==-1){"
+                "    els[i].click();return JSON.stringify({ok:true})}}"
+                "return JSON.stringify({ok:false,error:'no element with matching text'})"
+                "})()", escaped];
+        }
+
+        __block BOOL done = NO;
+        __block NSDictionary *response = nil;
+
+        [wv evaluateJavaScript:js completionHandler:^(id res, NSError *error) {
+            if (error) {
+                response = @{@"ok": @NO, @"error": error.localizedDescription ?: @"unknown"};
+            } else if (res && [res isKindOfClass:[NSString class]]) {
+                NSData *data = [(NSString *)res dataUsingEncoding:NSUTF8StringEncoding];
+                response = [NSJSONSerialization JSONObjectWithData:data options:0 error:nil];
+            }
+            done = YES;
+        }];
+
+        NSDate *timeout = [NSDate dateWithTimeIntervalSinceNow:5.0];
+        while (!done && [[NSRunLoop currentRunLoop] runMode:NSDefaultRunLoopMode
+                                                beforeDate:timeout]) {
+            if ([timeout timeIntervalSinceNow] <= 0) break;
+        }
+
+        if (!done) result = @{@"ok": @NO, @"error": @"click timeout"};
+        else if (response) result = response;
+        else result = @{@"ok": @NO, @"error": @"click failed"};
+    });
+    return result ?: @{@"ok": @NO, @"error": @"click failed"};
+}
+
 static NSDictionary *do_sleep_step(NSDictionary *json) {
     NSNumber *ms = json[@"ms"];
     double seconds = ms ? [ms doubleValue] / 1000.0 : 0.1;
@@ -460,6 +519,11 @@ static void handle_eval(int fd, HTTPRequest *req, ServeContext *ctx) {
     send_dict(fd, do_eval(json, ctx));
 }
 
+static void handle_click(int fd, HTTPRequest *req, ServeContext *ctx) {
+    NSDictionary *json = parse_json_body(req->body, req->body_len);
+    send_dict(fd, do_click(json, ctx));
+}
+
 static void handle_batch(int fd, HTTPRequest *req, ServeContext *ctx) {
     if (!req->body || req->body_len <= 0) {
         send_json(fd, 400, "{\"error\":\"missing body\"}");
@@ -500,6 +564,8 @@ static void handle_batch(int fd, HTTPRequest *req, ServeContext *ctx) {
             result = do_eval(step, ctx);
         } else if ([type isEqualToString:@"extract"]) {
             result = do_extract(ctx);
+        } else if ([type isEqualToString:@"click"]) {
+            result = do_click(step, ctx);
         } else if ([type isEqualToString:@"sleep"]) {
             result = do_sleep_step(step);
         } else {
@@ -549,6 +615,8 @@ static void *server_thread(void *arg) {
             handle_eval(client_fd, &req, ctx);
         } else if (strcmp(req.method, "GET") == 0 && strcmp(req.path, "/extract") == 0) {
             handle_extract(client_fd, ctx);
+        } else if (strcmp(req.method, "POST") == 0 && strcmp(req.path, "/click") == 0) {
+            handle_click(client_fd, &req, ctx);
         } else if (strcmp(req.method, "POST") == 0 && strcmp(req.path, "/batch") == 0) {
             handle_batch(client_fd, &req, ctx);
         } else {
