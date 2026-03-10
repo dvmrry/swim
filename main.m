@@ -1324,6 +1324,19 @@ int main(int argc, const char *argv[]) {
                     return event;
                 }
 
+                // Don't intercept in INSERT mode (except Escape and Cmd shortcuts)
+                if (app.mode.mode == MODE_INSERT && !([event.characters isEqualToString:@"\x1b"])
+                    && !(event.modifierFlags & NSEventModifierFlagCommand)) {
+                    // Handle Enter in sidebar — WKWebView swallows Return before JS keydown fires
+                    if (ui_sidebar_visible(app.ui) && (event.keyCode == 36 || event.keyCode == 76)) {
+                        if (!(event.modifierFlags & NSEventModifierFlagShift)) {
+                            ui_sidebar_enter(app.ui);
+                            return nil;
+                        }
+                    }
+                    return event;
+                }
+
                 const char *chars = [event.characters UTF8String];
                 if (!chars || !chars[0]) return event;
 

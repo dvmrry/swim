@@ -116,6 +116,7 @@ void ui_hide_sidebar(SwimUI *ui);
 void ui_toggle_sidebar(SwimUI *ui);
 bool ui_sidebar_visible(SwimUI *ui);
 void ui_sidebar_submit(SwimUI *ui, const char *prompt);
+void ui_sidebar_enter(SwimUI *ui);
 void ui_sidebar_respond(SwimUI *ui, const char *text, bool is_system);
 
 #endif

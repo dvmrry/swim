@@ -1889,3 +1889,23 @@ void ui_sidebar_submit(SwimUI *ui, const char *prompt) {
         ");", escaped, escaped];
     [ui->sidebarWebview evaluateJavaScript:js completionHandler:nil];
 }
+
+void ui_sidebar_enter(SwimUI *ui) {
+    // Read textarea value and submit via JS — Enter key doesn't reach WKWebView keydown
+    NSString *js =
+        @"(function() {"
+        "  var text = input.value.trim();"
+        "  if (!text) return '';"
+        "  promptHistory.push(text);"
+        "  historyIndex = promptHistory.length;"
+        "  addMessage('user', text);"
+        "  input.value = '';"
+        "  input.style.height = 'auto';"
+        "  showThinking();"
+        "  window.webkit.messageHandlers.swim.postMessage("
+        "    {type:'sidebar-prompt', text:text}"
+        "  );"
+        "  return text;"
+        "})()";
+    [ui->sidebarWebview evaluateJavaScript:js completionHandler:nil];
+}
