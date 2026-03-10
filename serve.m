@@ -946,6 +946,42 @@ static NSDictionary *do_console(ServeContext *ctx) {
     return eval_js_sync(ctx, js, @"console", 5.0, false);
 }
 
+static NSDictionary *do_upload(NSDictionary *json, ServeContext *ctx) {
+    NSString *selector = json[@"selector"];
+    NSString *data = json[@"data"]; // base64-encoded file contents
+    NSString *filename = json[@"filename"] ?: @"file";
+    NSString *mimeType = json[@"mime_type"] ?: @"application/octet-stream";
+    if (!selector) return @{@"ok": @NO, @"error": @"missing selector"};
+    if (!data) return @{@"ok": @NO, @"error": @"missing data (base64)"};
+
+    NSString *escapedSel = js_escape_sq(selector);
+    NSString *escapedName = js_escape_sq(filename);
+    NSString *escapedMime = js_escape_sq(mimeType);
+
+    NSString *js = [NSString stringWithFormat:
+        @"(function(){"
+        "var el=document.querySelector('%@');"
+        "if(!el)return JSON.stringify({ok:false,error:'not found'});"
+        "if(el.tagName!=='INPUT'||el.type!=='file')return JSON.stringify({ok:false,error:'not a file input'});"
+        "try{"
+        "  var b64='%@';"
+        "  var bin=atob(b64);"
+        "  var bytes=new Uint8Array(bin.length);"
+        "  for(var i=0;i<bin.length;i++)bytes[i]=bin.charCodeAt(i);"
+        "  var file=new File([bytes],'%@',{type:'%@'});"
+        "  var dt=new DataTransfer();"
+        "  dt.items.add(file);"
+        "  el.files=dt.files;"
+        "  el.dispatchEvent(new Event('change',{bubbles:true}));"
+        "  el.dispatchEvent(new Event('input',{bubbles:true}));"
+        "  return JSON.stringify({ok:true,filename:'%@',size:bytes.length})"
+        "}catch(e){return JSON.stringify({ok:false,error:e.message})}"
+        "})()",
+        escapedSel, data, escapedName, escapedMime, escapedName];
+
+    return eval_js_sync(ctx, js, @"upload", 5.0, false);
+}
+
 static NSDictionary *do_requests(ServeContext *ctx) {
     NSString *js =
         @"(function(){"
@@ -1174,6 +1210,11 @@ static void handle_requests(int fd, ServeContext *ctx) {
     send_dict(fd, do_requests(ctx));
 }
 
+static void handle_upload(int fd, HTTPRequest *req, ServeContext *ctx) {
+    NSDictionary *json = parse_json_body(req->body, req->body_len);
+    send_dict(fd, do_upload(json, ctx));
+}
+
 static void handle_query(int fd, HTTPRequest *req, ServeContext *ctx) {
     NSDictionary *json = parse_json_body(req->body, req->body_len);
     send_dict(fd, do_query(json, ctx));
@@ -1257,6 +1298,8 @@ static void handle_batch(int fd, HTTPRequest *req, ServeContext *ctx) {
             result = do_dialog(ctx);
         } else if ([type isEqualToString:@"requests"]) {
             result = do_requests(ctx);
+        } else if ([type isEqualToString:@"upload"]) {
+            result = do_upload(step, ctx);
         } else if ([type isEqualToString:@"query"]) {
             result = do_query(step, ctx);
         } else if ([type isEqualToString:@"tab"]) {
@@ -1321,6 +1364,7 @@ static const Route routes[] = {
     {"POST", "/storage",    {.post = handle_storage}},
     {"POST", "/hover",      {.post = handle_hover}},
     {"POST", "/drag",       {.post = handle_drag}},
+    {"POST", "/upload",     {.post = handle_upload}},
     {"POST", "/batch",      {.post = handle_batch}},
 };
 

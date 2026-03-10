@@ -26,7 +26,7 @@ make clean  # removes binary
 swim --serve 9111    # start with HTTP API on port 9111
 ```
 
-Endpoints: /health, /state, /screenshot, /pdf, /extract, /interact, /click, /hover, /drag, /fill, /select, /query, /scroll, /storage, /console, /dialog, /requests, /tab, /wait, /wait_for, /action, /command, /key, /eval, /batch, /resize
+Endpoints: /health, /state, /screenshot, /pdf, /extract, /interact, /click, /hover, /drag, /fill, /upload, /select, /query, /scroll, /storage, /console, /dialog, /requests, /tab, /wait, /wait_for, /action, /command, /key, /eval, /batch, /resize
 
 ## MCP Integration
 
@@ -34,13 +34,14 @@ Endpoints: /health, /state, /screenshot, /pdf, /extract, /interact, /click, /hov
 swim-mcp --port 9111  # MCP sidecar (add to Claude Code mcp.json)
 ```
 
-Tools: navigate, screenshot, extract, interact, fill, select, query, scroll, storage, tab, wait_for, execute, action, state, click, key, hover, console, navigate_back, navigate_forward, pdf, eval, drag, dialog, requests
+Tools: navigate, screenshot, extract, interact, fill, upload, select, query, scroll, storage, tab, wait_for, execute, action, state, click, key, hover, console, navigate_back, navigate_forward, pdf, eval, drag, dialog, requests
 
 Notes:
 - `navigate` waits for page load (polls until title is non-empty, up to 5s) and returns full page state
 - `wait_for` supports `idle:true` to wait for page stability (readyState complete + no DOM mutations for 500ms)
 - Dialog auto-response: alerts auto-accepted, confirms auto-yes, prompts return default text when serving
 - `requests` captures fetch/XHR calls (method, URL, status, timing) — first call installs hooks, subsequent calls drain the buffer
+- `upload` sets file input programmatically via DataTransfer API — takes selector, base64 data, filename, mime_type
 
 ## Conventions
 

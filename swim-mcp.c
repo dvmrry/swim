@@ -283,7 +283,7 @@ static const char *kToolsList =
     "\"properties\":{"
     "\"method\":{\"type\":\"string\",\"enum\":[\"navigate\",\"navigate_back\",\"navigate_forward\","
     "\"screenshot\",\"pdf\",\"extract\","
-    "\"interact\",\"fill\",\"wait_for\",\"console\",\"dialog\",\"requests\",\"query\",\"tab\",\"select\","
+    "\"interact\",\"fill\",\"upload\",\"wait_for\",\"console\",\"dialog\",\"requests\",\"query\",\"tab\",\"select\","
     "\"scroll\",\"storage\",\"drag\","
     "\"execute\",\"action\",\"state\",\"click\",\"hover\",\"key\",\"eval\"],"
     "\"description\":\"The operation to perform\"},"
@@ -307,7 +307,10 @@ static const char *kToolsList =
     "\"index\":{\"type\":\"integer\",\"description\":\"Tab index to switch to (tab)\"},"
     "\"from\":{\"type\":\"string\",\"description\":\"Source CSS selector (drag)\"},"
     "\"to\":{\"type\":\"string\",\"description\":\"Target CSS selector (drag)\"},"
-    "\"type\":{\"type\":\"string\",\"description\":\"Storage type: cookie, localStorage, sessionStorage (storage)\"}},"
+    "\"type\":{\"type\":\"string\",\"description\":\"Storage type: cookie, localStorage, sessionStorage (storage)\"},"
+    "\"data\":{\"type\":\"string\",\"description\":\"Base64-encoded file contents (upload)\"},"
+    "\"filename\":{\"type\":\"string\",\"description\":\"Filename for upload (upload, default: file)\"},"
+    "\"mime_type\":{\"type\":\"string\",\"description\":\"MIME type (upload, default: application/octet-stream)\"}},"
     "\"required\":[\"method\"]}}"
     "]}";
 
@@ -478,6 +481,32 @@ static char *handle_tool_call(const char *name, const char *arguments) {
         free(selector); free(value);
         if (!body) return strdup("{\"error\":\"missing selector or fields\"}");
         char *resp = http_post("/fill", body);
+        free(body);
+        return resp ? resp : strdup("{\"error\":\"connection failed\"}");
+    }
+
+    if (strcmp(name, "upload") == 0) {
+        char *selector = json_get_string(arguments, "selector");
+        char *data = json_get_string(arguments, "data");
+        if (!selector || !data) {
+            free(selector); free(data);
+            return strdup("{\"error\":\"missing selector or data\"}");
+        }
+        char *filename = json_get_string(arguments, "filename");
+        char *mime_type = json_get_string(arguments, "mime_type");
+        char *esc_sel = json_escape(selector);
+        char *esc_data = json_escape(data);
+        char *esc_fn = filename ? json_escape(filename) : strdup("file");
+        char *esc_mt = mime_type ? json_escape(mime_type) : strdup("application/octet-stream");
+        int bsize = (int)strlen(esc_sel) + (int)strlen(esc_data) +
+                    (int)strlen(esc_fn) + (int)strlen(esc_mt) + 128;
+        char *body = malloc(bsize);
+        snprintf(body, bsize,
+            "{\"selector\":\"%s\",\"data\":\"%s\",\"filename\":\"%s\",\"mime_type\":\"%s\"}",
+            esc_sel, esc_data, esc_fn, esc_mt);
+        free(esc_sel); free(esc_data); free(esc_fn); free(esc_mt);
+        free(selector); free(data); free(filename); free(mime_type);
+        char *resp = http_post("/upload", body);
         free(body);
         return resp ? resp : strdup("{\"error\":\"connection failed\"}");
     }

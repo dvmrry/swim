@@ -182,10 +182,10 @@ Same-origin: inject JS that traverses `iframe.contentDocument`.
 Cross-origin: `WKUserScript` with `forMainFrameOnly:NO` + message passing.
 Enterprise apps (Oracle, SAP) are iframe-heavy — needed for full LOB coverage.
 
-### File Upload ✓ Shipped (Interactive)
-Native NSOpenPanel via `runOpenPanelWithParameters:` WKUIDelegate. Works for
-normal browsing. Programmatic file upload (setting file inputs via API without
-the picker dialog) is not yet supported.
+### File Upload ✓ Shipped
+Native NSOpenPanel via `runOpenPanelWithParameters:` WKUIDelegate for interactive use.
+Programmatic upload via `/upload` endpoint and MCP `upload` method — sets file inputs
+via DataTransfer API (base64 data, filename, MIME type).
 
 ### Network Request Inspection ✓ Shipped (JS Layer)
 `/requests` injects fetch/XHR wrapper that captures method, URL, status,
