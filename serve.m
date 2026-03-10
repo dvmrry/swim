@@ -233,6 +233,30 @@ static bool translate_key(const char *name, const char **out_key, unsigned int *
 
 // --- Internal handlers that return result dictionaries (for batch use) ---
 
+// Lightweight state snapshot — append to mutating action responses
+// so callers don't need a separate /state round trip.
+static NSDictionary *state_snapshot(ServeContext *ctx) {
+    __block NSDictionary *snap = nil;
+    dispatch_sync(dispatch_get_main_queue(), ^{
+        Tab *active = browser_active(ctx->browser);
+        snap = @{
+            @"url": active ? [NSString stringWithUTF8String:active->url] : @"",
+            @"title": active ? [NSString stringWithUTF8String:active->title] : @"",
+            @"tab_count": @(ctx->browser->tab_count),
+            @"active_tab": @(ctx->browser->active_tab),
+        };
+    });
+    return snap;
+}
+
+static NSDictionary *with_state(NSDictionary *result, ServeContext *ctx) {
+    if (!result || ![result[@"ok"] boolValue]) return result;
+    NSDictionary *snap = state_snapshot(ctx);
+    NSMutableDictionary *merged = [result mutableCopy];
+    merged[@"state"] = snap;
+    return merged;
+}
+
 static NSDictionary *do_action(NSDictionary *json, ServeContext *ctx) {
     NSString *action = json[@"action"];
     if (!action) return @{@"ok": @NO, @"error": @"missing action"};
@@ -243,7 +267,7 @@ static NSDictionary *do_action(NSDictionary *json, ServeContext *ctx) {
         ctx->handle_action([action UTF8String], ctx->action_ctx);
         ctx->mode->count = 0;
     });
-    return @{@"ok": @YES};
+    return with_state(@{@"ok": @YES}, ctx);
 }
 
 static NSDictionary *do_command(NSDictionary *json, ServeContext *ctx) {
@@ -254,7 +278,7 @@ static NSDictionary *do_command(NSDictionary *json, ServeContext *ctx) {
     dispatch_sync(dispatch_get_main_queue(), ^{
         ok = registry_exec(ctx->commands, [command UTF8String]);
     });
-    return @{@"ok": @(ok)};
+    return with_state(@{@"ok": @(ok)}, ctx);
 }
 
 static NSDictionary *do_key(NSDictionary *json, ServeContext *ctx) {
@@ -271,7 +295,7 @@ static NSDictionary *do_key(NSDictionary *json, ServeContext *ctx) {
     dispatch_sync(dispatch_get_main_queue(), ^{
         consumed = mode_handle_key(ctx->mode, raw_key, modifiers);
     });
-    return @{@"ok": @YES, @"consumed": @(consumed)};
+    return with_state(@{@"ok": @YES, @"consumed": @(consumed)}, ctx);
 }
 
 static NSDictionary *do_screenshot(ServeContext *ctx) {
@@ -331,7 +355,30 @@ static NSDictionary *do_state(ServeContext *ctx) {
         }
         result = state;
     });
-    return result ?: @{@"ok": @NO, @"error": @"state failed"};
+    if (!result) return @{@"ok": @NO, @"error": @"state failed"};
+
+    // Add page fingerprint — detect changes without full extract
+    NSDictionary *fp = eval_js_sync(ctx,
+        @"(function(){"
+        "var b=document.body||document.documentElement;"
+        "var t=b?b.innerText:'';"
+        "var h=0;for(var i=0;i<t.length;i++){h=((h<<5)-h+t.charCodeAt(i))|0}"
+        "return JSON.stringify({"
+        "  content_hash:h,"
+        "  links:document.links.length,"
+        "  forms:document.forms.length,"
+        "  inputs:document.querySelectorAll('input,textarea,select').length,"
+        "  images:document.images.length,"
+        "  text_length:t.length"
+        "})"
+        "})()",
+        @"fingerprint", 2.0, false);
+    if (fp && fp[@"content_hash"]) {
+        NSMutableDictionary *merged = [result mutableCopy];
+        merged[@"page"] = fp;
+        result = merged;
+    }
+    return result;
 }
 
 static NSDictionary *do_resize(NSDictionary *json, ServeContext *ctx) {
@@ -551,7 +598,7 @@ static NSDictionary *do_fill(NSDictionary *json, ServeContext *ctx) {
 
     [js appendString:@"return JSON.stringify({ok:true,results:results})})()"];
 
-    return eval_js_sync(ctx, js, @"fill", 5.0, false);
+    return with_state(eval_js_sync(ctx, js, @"fill", 5.0, false), ctx);
 }
 
 static NSDictionary *do_click(NSDictionary *json, ServeContext *ctx) {
@@ -580,7 +627,7 @@ static NSDictionary *do_click(NSDictionary *json, ServeContext *ctx) {
             "})()", escaped];
     }
 
-    return eval_js_sync(ctx, js, @"click", 5.0, false);
+    return with_state(eval_js_sync(ctx, js, @"click", 5.0, false), ctx);
 }
 
 // --- Feature: /query — read element text, attributes, visibility ---
@@ -735,7 +782,7 @@ static NSDictionary *do_select(NSDictionary *json, ServeContext *ctx) {
 
     [js appendString:@"})()"];
 
-    return eval_js_sync(ctx, js, @"select", 5.0, false);
+    return with_state(eval_js_sync(ctx, js, @"select", 5.0, false), ctx);
 }
 
 // --- Feature: /scroll — scroll element into view ---
@@ -980,7 +1027,7 @@ static NSDictionary *do_upload(NSDictionary *json, ServeContext *ctx) {
         "})()",
         escapedSel, data, escapedName, escapedMime, escapedName];
 
-    return eval_js_sync(ctx, js, @"upload", 5.0, false);
+    return with_state(eval_js_sync(ctx, js, @"upload", 5.0, false), ctx);
 }
 
 static NSDictionary *do_requests(ServeContext *ctx) {
