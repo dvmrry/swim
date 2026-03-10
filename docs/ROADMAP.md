@@ -76,36 +76,44 @@ Unix philosophy: stdin commands, stdout results.
 
 ---
 
-## Phase 2: AI Copilot Mode
+## Phase 2: Automation & AI
 
-**Goal:** Bidirectional AI assistance while browsing.
+**Goal:** Teach swim workflows, replay them, bring AI in only when needed.
 
-### 2.1 AI Copilot (`:ai <prompt>`)
-AI watches page context (URL, title, content) and responds with
-browser actions through the same command/action dispatch system.
+### 2.1 Event Stream (`/events`)
+Server-Sent Events endpoint. swim pushes actions as they happen:
+navigation, form fills, clicks, page loads, console errors. Foundation
+for recording, replay, and live AI observation. Cheap to build —
+`handle_action` is already the single chokepoint.
 
-- `:ai summarize` — extract and summarize current page
-- `:ai find pricing` — navigate to pricing page
-- `:ai fill form` — fill form fields from context
-- `:ai compare tabs` — compare content across open tabs
-
-The AI uses the same commands you do. No special API needed.
-
-### 2.2 Passive Suggestions
-AI observes browsing patterns and surfaces suggestions in status bar:
-- "3 tabs on same domain — close duplicates?"
-- "This page has a reader mode — press :focus"
-- "Login page detected — check password manager?"
-
-Opt-in, dismissable, non-intrusive.
-
-### 2.3 Session Recording/Replay
-Every action flows through `handle_action`, so recording a session
-is logging actions with timestamps. Replay is posting them back.
+### 2.2 Session Recording/Replay
+Every action flows through `handle_action`, so recording is logging
+the event stream with timestamps. Replay is posting actions back.
 
 - `:record start/stop` — capture action sequences
 - `:replay <name>` — replay a recorded session
-- Export as shell script (curl commands to the API)
+- Export as workflow JSON or shell script
+
+### 2.3 Workflow Sidecar (swim-auto)
+Lightweight state machine that subscribes to the event stream and
+executes known workflows without LLM calls. Portable JSON workflow
+files: trigger condition + ordered steps (wait, fill, click).
+
+Claude only gets called to:
+- Build a new workflow from a recording ("I watched you do this — here's the pattern")
+- Handle unexpected page states ("new captcha field appeared")
+- Answer ad-hoc questions about page content
+
+No tokens burned on repetitive work. The sidecar acts, Claude teaches.
+
+### 2.4 AI Copilot (`:ai <prompt>`)
+Direct Claude integration for ad-hoc page interaction:
+
+- `:ai summarize` — extract and summarize current page
+- `:ai fill form` — fill form fields from context
+- `:ai compare tabs` — compare content across open tabs
+
+Uses the same commands/actions the user does. No special API.
 
 ---
 
