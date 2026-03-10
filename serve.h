@@ -21,4 +21,8 @@ typedef struct ServeContext {
 // ctx must remain valid for the lifetime of the server.
 void serve_start(const char *addr, ServeContext *ctx);
 
+// Sidebar MCP bridge — implemented in main.m, called from serve.m
+void sidebar_clear_pending(void);
+void sidebar_post_response(const char *text, bool is_system);
+
 #endif

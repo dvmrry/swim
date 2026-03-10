@@ -360,7 +360,13 @@ static void handle_action(const char *action, void *ctx) {
         }
     } else if (strcmp(action, "toggle-sidebar") == 0) {
         ui_toggle_sidebar(app.ui);
-        if (!ui_sidebar_visible(app.ui)) app_set_mode(MODE_NORMAL);
+        if (ui_sidebar_visible(app.ui)) {
+            app_set_mode(MODE_INSERT);
+        } else {
+            // Delay NORMAL mode to override any page focus events
+            dispatch_after(dispatch_time(DISPATCH_TIME_NOW, 100 * NSEC_PER_MSEC),
+                dispatch_get_main_queue(), ^{ app_set_mode(MODE_NORMAL); });
+        }
     }
 }
 
@@ -585,15 +591,17 @@ static void cmd_ai(const char *args, void *ctx) {
     (void)ctx;
     if (!args || !args[0]) {
         ui_toggle_sidebar(app.ui);
-        if (!ui_sidebar_visible(app.ui)) app_set_mode(MODE_NORMAL);
+        app_set_mode(ui_sidebar_visible(app.ui) ? MODE_INSERT : MODE_NORMAL);
         return;
     }
     if (strcmp(args, "close") == 0) {
         ui_hide_sidebar(app.ui);
-        app_set_mode(MODE_NORMAL);
+        dispatch_after(dispatch_time(DISPATCH_TIME_NOW, 100 * NSEC_PER_MSEC),
+            dispatch_get_main_queue(), ^{ app_set_mode(MODE_NORMAL); });
         return;
     }
     ui_sidebar_submit(app.ui, args);
+    app_set_mode(MODE_INSERT);
 }
 
 static void cmd_focus(const char *args, void *ctx) {
@@ -840,6 +848,10 @@ static void on_command_cancel(void *ctx) {
 }
 
 static NSMutableArray *g_sidebar_messages = nil;
+static bool g_serving = false;
+
+// Pending sidebar prompt for MCP polling (when no direct API key)
+static NSMutableDictionary *g_sidebar_pending = nil;
 
 static void on_url_changed(const char *url, int tab_id, void *ctx) {
     (void)ctx;
@@ -890,14 +902,36 @@ static void on_nav_error(const char *error, int tab_id, void *ctx) {
 
 static void on_focus_changed(bool focused, void *ctx) {
     (void)ctx;
+    // Don't let page blur override INSERT when sidebar owns focus
+    if (!focused && ui_sidebar_visible(app.ui)) return;
     app_set_mode(focused ? MODE_INSERT : MODE_NORMAL);
 }
 
 static void on_sidebar_prompt(const char *text, void *ctx) {
     (void)ctx;
-    if (!app.config.ai_api_key[0]) {
+    // Check config first, then fall back to ANTHROPIC_API_KEY env var
+    const char *api_key = app.config.ai_api_key;
+    if (!api_key[0]) {
+        const char *env_key = getenv("ANTHROPIC_API_KEY");
+        if (env_key && env_key[0]) {
+            snprintf(app.config.ai_api_key, sizeof(app.config.ai_api_key), "%s", env_key);
+            api_key = app.config.ai_api_key;
+        }
+    }
+
+    // No API key — queue for MCP if serving, otherwise show error
+    if (!api_key[0]) {
+        if (g_serving) {
+            Tab *active = browser_active(&app.browser);
+            g_sidebar_pending = [NSMutableDictionary dictionaryWithDictionary:@{
+                @"prompt": [NSString stringWithUTF8String:text],
+                @"url": active && active->url[0] ? [NSString stringWithUTF8String:active->url] : @"",
+                @"title": active && active->title[0] ? [NSString stringWithUTF8String:active->title] : @"",
+            }];
+            return;
+        }
         ui_sidebar_respond(app.ui,
-            "No API key. Add to ~/.config/swim/config.toml:\n\n"
+            "No API key. Set ANTHROPIC_API_KEY or add to config.toml:\n\n"
             "[ai]\napi_key = \"sk-ant-...\"", true);
         return;
     }
@@ -985,6 +1019,22 @@ static void on_sidebar_prompt(const char *text, void *ctx) {
             ui_sidebar_respond(app.ui, "Empty response from API.", true);
         });
     }] resume];
+}
+
+// Sidebar MCP bridge functions (called from serve.m on server thread)
+NSDictionary *sidebar_get_pending(void) {
+    return g_sidebar_pending;
+}
+
+void sidebar_clear_pending(void) {
+    g_sidebar_pending = nil;
+}
+
+void sidebar_post_response(const char *text, bool is_system) {
+    NSString *response = [NSString stringWithUTF8String:text];
+    dispatch_async(dispatch_get_main_queue(), ^{
+        ui_sidebar_respond(app.ui, [response UTF8String], is_system);
+    });
 }
 
 static void on_hints_done(void *ctx) {
@@ -1263,6 +1313,7 @@ int main(int argc, const char *argv[]) {
                 .action_ctx = &app,
             };
             serve_start(serve_addr, &serve_ctx);
+            g_serving = true;
         }
 
         // Key event monitor

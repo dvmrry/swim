@@ -1372,6 +1372,38 @@ static void handle_batch(int fd, HTTPRequest *req, ServeContext *ctx) {
     send_dict(fd, response);
 }
 
+// --- Sidebar MCP bridge ---
+
+// Declared in main.m
+extern NSDictionary *sidebar_get_pending(void);
+
+static void handle_sidebar_get(int fd, ServeContext *ctx) {
+    (void)ctx;
+    NSDictionary *pending = sidebar_get_pending();
+    if (pending) {
+        send_dict(fd, @{@"ok": @YES, @"pending": @YES,
+            @"prompt": pending[@"prompt"] ?: @"",
+            @"url": pending[@"url"] ?: @"",
+            @"title": pending[@"title"] ?: @""});
+    } else {
+        send_dict(fd, @{@"ok": @YES, @"pending": @NO});
+    }
+}
+
+static void handle_sidebar_post(int fd, HTTPRequest *req, ServeContext *ctx) {
+    (void)ctx;
+    NSDictionary *json = parse_json_body(req->body, req->body_len);
+    NSString *text = json[@"text"];
+    if (!text) {
+        send_dict(fd, @{@"ok": @NO, @"error": @"missing text"});
+        return;
+    }
+    bool is_system = [json[@"is_system"] boolValue];
+    sidebar_clear_pending();
+    sidebar_post_response([text UTF8String], is_system);
+    send_dict(fd, @{@"ok": @YES});
+}
+
 // --- Route table ---
 
 typedef void (*get_handler_fn)(int fd, ServeContext *ctx);
@@ -1414,6 +1446,8 @@ static const Route routes[] = {
     {"POST", "/drag",       {.post = handle_drag}},
     {"POST", "/upload",     {.post = handle_upload}},
     {"POST", "/batch",      {.post = handle_batch}},
+    {"GET",  "/sidebar",    {.get  = handle_sidebar_get}},
+    {"POST", "/sidebar",    {.post = handle_sidebar_post}},
 };
 
 static const int route_count = sizeof(routes) / sizeof(routes[0]);

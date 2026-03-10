@@ -108,6 +108,16 @@ static char *json_get_object(const char *json, const char *key) {
     return result;
 }
 
+static bool json_get_bool(const char *json, const char *key) {
+    char search[256];
+    snprintf(search, sizeof(search), "\"%s\"", key);
+    const char *p = strstr(json, search);
+    if (!p) return false;
+    p += strlen(search);
+    while (*p == ' ' || *p == '\t' || *p == ':') p++;
+    return strncmp(p, "true", 4) == 0;
+}
+
 // --- HTTP Client ---
 
 static char *http_request(const char *method, const char *path,
@@ -297,7 +307,7 @@ static const char *kToolsList =
     "\"screenshot\",\"pdf\",\"extract\","
     "\"interact\",\"fill\",\"upload\",\"wait_for\",\"console\",\"dialog\",\"requests\",\"query\",\"tab\",\"select\","
     "\"scroll\",\"storage\",\"drag\","
-    "\"execute\",\"action\",\"state\",\"click\",\"hover\",\"key\",\"eval\"],"
+    "\"execute\",\"action\",\"state\",\"click\",\"hover\",\"key\",\"eval\",\"sidebar\"],"
     "\"description\":\"The operation to perform\"},"
     "\"url\":{\"type\":\"string\",\"description\":\"URL to navigate to (navigate)\"},"
     "\"command\":{\"type\":\"string\",\"description\":\"Command to run (execute)\"},"
@@ -743,6 +753,23 @@ static char *handle_tool_call(const char *name, const char *arguments) {
 
     if (strcmp(name, "dialog") == 0) return get_passthrough("/dialog");
     if (strcmp(name, "requests") == 0) return get_passthrough("/requests");
+
+    if (strcmp(name, "sidebar") == 0) {
+        char *text = json_get_string(arguments, "text");
+        if (text) {
+            // Post response to sidebar
+            char *escaped = json_escape(text);
+            bool is_system = json_get_bool(arguments, "is_system");
+            char body[8192];
+            snprintf(body, sizeof(body), "{\"text\":\"%s\",\"is_system\":%s}",
+                escaped, is_system ? "true" : "false");
+            free(escaped); free(text);
+            char *resp = http_post("/sidebar", body);
+            return resp ? resp : strdup("{\"error\":\"connection failed\"}");
+        }
+        // No text — poll for pending prompt
+        return get_passthrough("/sidebar");
+    }
 
     return strdup("{\"error\":\"unknown tool\"}");
 }

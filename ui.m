@@ -115,10 +115,12 @@ void ui_sidebar_respond(SwimUI *ui, const char *text, bool is_system);
     } else if ([type isEqualToString:@"sidebar-escape"]) {
         if (self.ui) {
             ui_hide_sidebar(self.ui);
-            // Force NORMAL since blur may not fire on hidden webview
-            if (self.callbacks.on_focus_changed) {
-                self.callbacks.on_focus_changed(false, self.callbacks.ctx);
-            }
+            // Delay NORMAL to override page auto-focus events
+            UICallbacks cbs = self.callbacks;
+            dispatch_after(dispatch_time(DISPATCH_TIME_NOW, 100 * NSEC_PER_MSEC),
+                dispatch_get_main_queue(), ^{
+                    if (cbs.on_focus_changed) cbs.on_focus_changed(false, cbs.ctx);
+                });
         }
     }
 }
