@@ -379,6 +379,11 @@ static SwimTabBarHandler *sTabBarHandler;
         decisionHandler(WKNavigationActionPolicyDownload);
         return;
     }
+    // Allow iframe navigations without interference
+    if (!navigationAction.targetFrame.isMainFrame) {
+        decisionHandler(WKNavigationActionPolicyAllow);
+        return;
+    }
     // Cmd-click or middle-click → open in new tab
     if (navigationAction.navigationType == WKNavigationTypeLinkActivated &&
         (navigationAction.modifierFlags & NSEventModifierFlagCommand)) {
