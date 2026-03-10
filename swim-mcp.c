@@ -300,7 +300,8 @@ static const char *kToolsList =
     "interact, fill (selector+value or fields[]), wait_for (selector|url_contains, timeout?), "
     "console, dialog, requests (network log), query (selector, attribute?, all?), tab (index), select (selector, text|value), "
     "scroll (selector), storage (type, action?, key?, value?), drag (from, to), "
-    "execute (command), action (action, count?), state, click (selector|text), hover (selector), key (key)\","
+    "execute (command), action (action, count?), state, click (selector|text), hover (selector), key (key), "
+    "sidebar (poll for user prompts — long-polls up to 30s; or respond with text)\","
     "\"inputSchema\":{\"type\":\"object\","
     "\"properties\":{"
     "\"method\":{\"type\":\"string\",\"enum\":[\"navigate\",\"navigate_back\",\"navigate_forward\","
@@ -767,8 +768,18 @@ static char *handle_tool_call(const char *name, const char *arguments) {
             char *resp = http_post("/sidebar", body);
             return resp ? resp : strdup("{\"error\":\"connection failed\"}");
         }
-        // No text — poll for pending prompt
-        return get_passthrough("/sidebar");
+        // No text — long-poll for pending prompt (up to 30s)
+        for (int i = 0; i < 60; i++) {
+            char *resp = http_get("/sidebar");
+            if (!resp) return strdup("{\"error\":\"connection failed\"}");
+            // Check if pending is true
+            if (strstr(resp, "\"pending\":true")) {
+                return resp;
+            }
+            free(resp);
+            usleep(500000); // 500ms
+        }
+        return strdup("{\"ok\":true,\"pending\":false}");
     }
 
     return strdup("{\"error\":\"unknown tool\"}");

@@ -29,7 +29,7 @@ swim --serve /tmp/s   # Unix socket at custom path
 swim --profile casual # load ~/.config/swim/profiles/casual.toml overlay
 ```
 
-Endpoints: /health, /state, /screenshot, /pdf, /extract, /interact, /click, /hover, /drag, /fill, /upload, /select, /query, /scroll, /storage, /console, /dialog, /requests, /tab, /wait, /wait_for, /action, /command, /key, /eval, /batch, /resize
+Endpoints: /health, /state, /screenshot, /pdf, /extract, /interact, /click, /hover, /drag, /fill, /upload, /select, /query, /scroll, /storage, /console, /dialog, /requests, /tab, /wait, /wait_for, /action, /command, /key, /eval, /batch, /resize, /sidebar
 
 ## MCP Integration
 
@@ -38,7 +38,7 @@ swim-mcp              # connects via Unix socket (default)
 swim-mcp --port 9111  # connects via TCP
 ```
 
-Tools: navigate, screenshot, extract, interact, fill, upload, select, query, scroll, storage, tab, wait_for, execute, action, state, click, key, hover, console, navigate_back, navigate_forward, pdf, eval, drag, dialog, requests
+Tools: navigate, screenshot, extract, interact, fill, upload, select, query, scroll, storage, tab, wait_for, execute, action, state, click, key, hover, console, navigate_back, navigate_forward, pdf, eval, drag, dialog, requests, sidebar
 
 Notes:
 - `navigate` waits for page load (polls until title is non-empty, up to 5s) and returns full page state
@@ -46,6 +46,7 @@ Notes:
 - Dialog auto-response: alerts auto-accepted, confirms auto-yes, prompts return default text when serving
 - `requests` captures fetch/XHR calls (method, URL, status, timing) — first call installs hooks, subsequent calls drain the buffer
 - `upload` sets file input programmatically via DataTransfer API — takes selector, base64 data, filename, mime_type
+- `sidebar` bridges the AI sidebar: call with no args to long-poll for user prompts (30s), call with `text` to post a response
 
 ## Conventions
 
