@@ -187,11 +187,20 @@ Native NSOpenPanel via `runOpenPanelWithParameters:` WKUIDelegate. Works for
 normal browsing. Programmatic file upload (setting file inputs via API without
 the picker dialog) is not yet supported.
 
-### Network Request Inspection
-WKWebView doesn't expose the network layer. `WKURLSchemeHandler` only works
-for custom schemes, not https. Best approach: inject fetch/XHR wrapper JS
-(same pattern as console capture) to log JS-initiated requests to a buffer.
-Won't capture image/CSS/iframe loads but covers the 90% automation case.
+### Network Request Inspection ✓ Shipped (JS Layer)
+`/requests` injects fetch/XHR wrapper that captures method, URL, status,
+timing for JS-initiated requests. First call installs hooks, subsequent
+calls drain the buffer. Covers the 90% automation case (API calls, form
+submissions, AJAX). Does not capture image/CSS loads or protocol metadata.
+
+**Future: Full Network Inspection (WebKit Inspector Protocol)**
+WKWebView has an undocumented inspection protocol (same family as Chrome
+DevTools Protocol). Accessible via `_WKInspector` private APIs or
+`com.apple.webinspector` XPC service. Would give full headers, timing
+waterfall, protocol version, response bodies — equivalent to Safari's
+Network tab but programmatic. Private API (not App Store safe, could
+break on macOS updates). Protocol source is in WebKit repo. Worth
+exploring when JS-level capture proves insufficient.
 
 ### Drag and Drop ✓ Shipped
 `/drag` dispatches mousedown/mousemove/mouseup + HTML5 drag events between two selectors.
