@@ -109,4 +109,11 @@ void *ui_get_active_webview(SwimUI *ui);
 void ui_set_serving(SwimUI *ui, bool serving);
 void *ui_get_dialog_queue(SwimUI *ui);  // returns NSMutableArray*
 
+// AI Sidebar
+void ui_show_sidebar(SwimUI *ui);
+void ui_hide_sidebar(SwimUI *ui);
+void ui_toggle_sidebar(SwimUI *ui);
+bool ui_sidebar_visible(SwimUI *ui);
+void ui_sidebar_submit(SwimUI *ui, const char *prompt);
+
 #endif

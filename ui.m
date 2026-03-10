@@ -2,6 +2,7 @@
 #import <WebKit/WebKit.h>
 #import <Network/Network.h>
 #include <strings.h>
+#include <math.h>
 #include "ui.h"
 
 #define MAX_TABS 128
@@ -69,6 +70,9 @@ static const char *mode_name(Mode mode) {
 @property (assign) SwimUI *ui;
 @end
 
+// Forward declarations for sidebar (struct defined later)
+static void ui_sidebar_respond(SwimUI *ui, const char *text, bool is_system);
+
 @implementation SwimScriptHandler
 - (void)userContentController:(WKUserContentController *)ctrl
       didReceiveScriptMessage:(WKScriptMessage *)message {
@@ -100,6 +104,19 @@ static const char *mode_name(Mode mode) {
     } else if ([type isEqualToString:@"hints-done"] || [type isEqualToString:@"hints-cancelled"]) {
         if (self.callbacks.on_hints_done) {
             self.callbacks.on_hints_done(self.callbacks.ctx);
+        }
+    } else if ([type isEqualToString:@"sidebar-prompt"]) {
+        if (self.ui) {
+            // For now, show placeholder — will route through MCP
+            ui_sidebar_respond(self.ui, "AI companion not yet connected. This is a UI preview.", true);
+        }
+    } else if ([type isEqualToString:@"sidebar-escape"]) {
+        if (self.ui) {
+            ui_hide_sidebar(self.ui);
+            // Force NORMAL since blur may not fire on hidden webview
+            if (self.callbacks.on_focus_changed) {
+                self.callbacks.on_focus_changed(false, self.callbacks.ctx);
+            }
         }
     }
 }
@@ -172,12 +189,63 @@ struct SwimUI {
     SwimTheme *theme;
     bool serving;
     NSMutableArray *dialog_queue;  // queued dialog events when serving
+
+    // AI Sidebar
+    WKWebView *sidebarWebview;
+    NSView *sidebarContainer;
+    NSView *sidebarSeparator;
+    NSView *contentSplit;  // horizontal container: webview + sidebar
+    NSLayoutConstraint *sidebarWidth;
+    NSLayoutConstraint *sidebarZeroWidth;
+    NSLayoutConstraint *sidebarSepWidth;
+    bool sidebar_visible;
 };
 
 // --- Theme Colors ---
 
 static NSColor *tc(ThemeColor c) {
     return [NSColor colorWithSRGBRed:c.r green:c.g blue:c.b alpha:1];
+}
+
+static void theme_hex_ui(ThemeColor c, char *buf) {
+    snprintf(buf, 8, "#%02x%02x%02x",
+        (int)(c.r * 255), (int)(c.g * 255), (int)(c.b * 255));
+}
+
+// Sidebar HTML template
+static const char *kSidebarHTML =
+#include "sidebar_html.inc"
+;
+
+static NSString *build_sidebar_html(SwimTheme *theme) {
+    char bg[8], status_bg[8], fg[8], fg_dim[8], accent[8];
+    theme_hex_ui(theme->bg, bg);
+    theme_hex_ui(theme->status_bg, status_bg);
+    theme_hex_ui(theme->fg, fg);
+    theme_hex_ui(theme->fg_dim, fg_dim);
+    theme_hex_ui(theme->accent, accent);
+
+    // fg_dim but slightly brighter for AI responses
+    char fg_dim_bright[8];
+    snprintf(fg_dim_bright, 8, "#%02x%02x%02x",
+        (int)(fmin(1.0, theme->fg_dim.r + 0.15) * 255),
+        (int)(fmin(1.0, theme->fg_dim.g + 0.15) * 255),
+        (int)(fmin(1.0, theme->fg_dim.b + 0.15) * 255));
+
+    NSMutableString *html = [NSMutableString stringWithUTF8String:kSidebarHTML];
+    [html replaceOccurrencesOfString:@"%BG%" withString:@(bg)
+        options:0 range:NSMakeRange(0, html.length)];
+    [html replaceOccurrencesOfString:@"%STATUS_BG%" withString:@(status_bg)
+        options:0 range:NSMakeRange(0, html.length)];
+    [html replaceOccurrencesOfString:@"%FG%" withString:@(fg)
+        options:0 range:NSMakeRange(0, html.length)];
+    [html replaceOccurrencesOfString:@"%FG_DIM%" withString:@(fg_dim)
+        options:0 range:NSMakeRange(0, html.length)];
+    [html replaceOccurrencesOfString:@"%FG_DIM_BRIGHT%" withString:@(fg_dim_bright)
+        options:0 range:NSMakeRange(0, html.length)];
+    [html replaceOccurrencesOfString:@"%ACCENT%" withString:@(accent)
+        options:0 range:NSMakeRange(0, html.length)];
+    return html;
 }
 
 static NSString *normalize_url(NSString *urlStr) {
@@ -192,6 +260,16 @@ static int parse_bar_mode(const char *mode) {
     if (strcmp(mode, "never") == 0) return 1;
     if (strcmp(mode, "auto") == 0) return 2;
     return 0;
+}
+
+static void ui_sidebar_respond(SwimUI *ui, const char *text, bool is_system) {
+    NSString *escaped = [[NSString stringWithUTF8String:text]
+        stringByReplacingOccurrencesOfString:@"\\" withString:@"\\\\"];
+    escaped = [escaped stringByReplacingOccurrencesOfString:@"'" withString:@"\\'"];
+    escaped = [escaped stringByReplacingOccurrencesOfString:@"\n" withString:@"\\n"];
+    NSString *fn = is_system ? @"receiveSystem" : @"receiveResponse";
+    NSString *js = [NSString stringWithFormat:@"%@('%@')", fn, escaped];
+    [ui->sidebarWebview evaluateJavaScript:js completionHandler:nil];
 }
 
 static bool is_blocked_scheme(const char *url) {
@@ -909,6 +987,63 @@ SwimUI *ui_create(UICallbacks callbacks, bool compact_titlebar, const char *tab_
     ui->webviewContainer = [[NSView alloc] init];
     ui->webviewContainer.translatesAutoresizingMaskIntoConstraints = NO;
 
+    // AI Sidebar
+    WKWebViewConfiguration *sidebarConfig = [[WKWebViewConfiguration alloc] init];
+    [sidebarConfig.userContentController addScriptMessageHandler:ui->scriptHandler name:@"swim"];
+    ui->sidebarWebview = [[WKWebView alloc] initWithFrame:NSZeroRect configuration:sidebarConfig];
+    ui->sidebarWebview.translatesAutoresizingMaskIntoConstraints = NO;
+
+    ui->sidebarSeparator = [[NSView alloc] init];
+    ui->sidebarSeparator.translatesAutoresizingMaskIntoConstraints = NO;
+    ui->sidebarSeparator.wantsLayer = YES;
+    ui->sidebarSeparator.layer.backgroundColor = (tc(ui->theme->status_bg)).CGColor;
+
+    ui->sidebarContainer = [[NSView alloc] init];
+    ui->sidebarContainer.translatesAutoresizingMaskIntoConstraints = NO;
+    [ui->sidebarContainer addSubview:ui->sidebarWebview];
+    [NSLayoutConstraint activateConstraints:@[
+        [ui->sidebarWebview.topAnchor constraintEqualToAnchor:ui->sidebarContainer.topAnchor],
+        [ui->sidebarWebview.bottomAnchor constraintEqualToAnchor:ui->sidebarContainer.bottomAnchor],
+        [ui->sidebarWebview.leadingAnchor constraintEqualToAnchor:ui->sidebarContainer.leadingAnchor],
+        [ui->sidebarWebview.trailingAnchor constraintEqualToAnchor:ui->sidebarContainer.trailingAnchor],
+    ]];
+
+    // Content split: webview container + separator + sidebar
+    ui->contentSplit = [[NSView alloc] init];
+    ui->contentSplit.translatesAutoresizingMaskIntoConstraints = NO;
+    [ui->contentSplit addSubview:ui->webviewContainer];
+    [ui->contentSplit addSubview:ui->sidebarSeparator];
+    [ui->contentSplit addSubview:ui->sidebarContainer];
+
+    [NSLayoutConstraint activateConstraints:@[
+        [ui->webviewContainer.topAnchor constraintEqualToAnchor:ui->contentSplit.topAnchor],
+        [ui->webviewContainer.bottomAnchor constraintEqualToAnchor:ui->contentSplit.bottomAnchor],
+        [ui->webviewContainer.leadingAnchor constraintEqualToAnchor:ui->contentSplit.leadingAnchor],
+
+        [ui->sidebarSeparator.topAnchor constraintEqualToAnchor:ui->contentSplit.topAnchor],
+        [ui->sidebarSeparator.bottomAnchor constraintEqualToAnchor:ui->contentSplit.bottomAnchor],
+        [ui->sidebarSeparator.leadingAnchor constraintEqualToAnchor:ui->webviewContainer.trailingAnchor],
+
+        [ui->sidebarContainer.topAnchor constraintEqualToAnchor:ui->contentSplit.topAnchor],
+        [ui->sidebarContainer.bottomAnchor constraintEqualToAnchor:ui->contentSplit.bottomAnchor],
+        [ui->sidebarContainer.leadingAnchor constraintEqualToAnchor:ui->sidebarSeparator.trailingAnchor],
+        [ui->sidebarContainer.trailingAnchor constraintEqualToAnchor:ui->contentSplit.trailingAnchor],
+    ]];
+
+    // Sidebar width constraints (toggle between 320 and 0)
+    ui->sidebarWidth = [ui->sidebarContainer.widthAnchor constraintEqualToConstant:320];
+    ui->sidebarZeroWidth = [ui->sidebarContainer.widthAnchor constraintEqualToConstant:0];
+    ui->sidebarSepWidth = [ui->sidebarSeparator.widthAnchor constraintEqualToConstant:1];
+    ui->sidebarZeroWidth.active = YES;
+    ui->sidebarSepWidth.active = YES;
+    ui->sidebarContainer.hidden = YES;
+    ui->sidebarSeparator.hidden = YES;
+    ui->sidebar_visible = false;
+
+    // Load sidebar HTML
+    NSString *sidebarHTML = build_sidebar_html(ui->theme);
+    [ui->sidebarWebview loadHTMLString:sidebarHTML baseURL:nil];
+
     // Status bar
     ui->modeLabel = make_label(@" NORMAL ");
     ui->modeLabel.font = [NSFont monospacedSystemFontOfSize:11 weight:NSFontWeightBold];
@@ -1009,7 +1144,7 @@ SwimUI *ui_create(UICallbacks callbacks, bool compact_titlebar, const char *tab_
 
     [ui->rootView addSubview:ui->tabBarScroll];
     [ui->rootView addSubview:ui->tabSeparator];
-    [ui->rootView addSubview:ui->webviewContainer];
+    [ui->rootView addSubview:ui->contentSplit];
     [ui->rootView addSubview:ui->statusBar];
     [ui->rootView addSubview:ui->findBarContainer];
     [ui->rootView addSubview:ui->commandBarContainer];
@@ -1030,13 +1165,13 @@ SwimUI *ui_create(UICallbacks callbacks, bool compact_titlebar, const char *tab_
         [ui->tabSeparator.trailingAnchor constraintEqualToAnchor:ui->rootView.trailingAnchor],
         [ui->tabSeparator.heightAnchor constraintEqualToConstant:1],
 
-        // WebView container fills middle
-        [ui->webviewContainer.topAnchor constraintEqualToAnchor:ui->tabSeparator.bottomAnchor],
-        [ui->webviewContainer.leadingAnchor constraintEqualToAnchor:ui->rootView.leadingAnchor],
-        [ui->webviewContainer.trailingAnchor constraintEqualToAnchor:ui->rootView.trailingAnchor],
+        // Content split fills middle (webview + sidebar)
+        [ui->contentSplit.topAnchor constraintEqualToAnchor:ui->tabSeparator.bottomAnchor],
+        [ui->contentSplit.leadingAnchor constraintEqualToAnchor:ui->rootView.leadingAnchor],
+        [ui->contentSplit.trailingAnchor constraintEqualToAnchor:ui->rootView.trailingAnchor],
 
-        // Status bar below webview
-        [ui->statusBar.topAnchor constraintEqualToAnchor:ui->webviewContainer.bottomAnchor],
+        // Status bar below content split
+        [ui->statusBar.topAnchor constraintEqualToAnchor:ui->contentSplit.bottomAnchor],
         [ui->statusBar.leadingAnchor constraintEqualToAnchor:ui->rootView.leadingAnchor],
         [ui->statusBar.trailingAnchor constraintEqualToAnchor:ui->rootView.trailingAnchor],
 
@@ -1052,10 +1187,10 @@ SwimUI *ui_create(UICallbacks callbacks, bool compact_titlebar, const char *tab_
         [ui->commandBarContainer.bottomAnchor constraintEqualToAnchor:ui->rootView.bottomAnchor],
     ]];
 
-    [ui->webviewContainer setContentHuggingPriority:NSLayoutPriorityDefaultLow
-                                     forOrientation:NSLayoutConstraintOrientationVertical];
-    [ui->webviewContainer setContentCompressionResistancePriority:NSLayoutPriorityDefaultLow
-                                                  forOrientation:NSLayoutConstraintOrientationVertical];
+    [ui->contentSplit setContentHuggingPriority:NSLayoutPriorityDefaultLow
+                                forOrientation:NSLayoutConstraintOrientationVertical];
+    [ui->contentSplit setContentCompressionResistancePriority:NSLayoutPriorityDefaultLow
+                                             forOrientation:NSLayoutConstraintOrientationVertical];
 
     // Zero-height constraints for hidden bars (prevents bottom buffer)
     ui->cmdBarHeight = [ui->commandBarContainer.heightAnchor constraintEqualToConstant:0];
@@ -1697,4 +1832,54 @@ void ui_set_serving(SwimUI *ui, bool serving) {
 void *ui_get_dialog_queue(SwimUI *ui) {
     if (!ui->dialog_queue) ui->dialog_queue = [NSMutableArray new];
     return (__bridge void *)ui->dialog_queue;
+}
+
+// --- AI Sidebar ---
+
+void ui_show_sidebar(SwimUI *ui) {
+    if (ui->sidebar_visible) return;
+    ui->sidebar_visible = true;
+    ui->sidebarContainer.hidden = NO;
+    ui->sidebarSeparator.hidden = NO;
+    ui->sidebarZeroWidth.active = NO;
+    ui->sidebarWidth.active = YES;
+    [ui->window makeFirstResponder:ui->sidebarWebview];
+    [ui->sidebarWebview evaluateJavaScript:@"focusInput()" completionHandler:nil];
+}
+
+void ui_hide_sidebar(SwimUI *ui) {
+    if (!ui->sidebar_visible) return;
+    ui->sidebar_visible = false;
+    ui->sidebarWidth.active = NO;
+    ui->sidebarZeroWidth.active = YES;
+    ui->sidebarContainer.hidden = YES;
+    ui->sidebarSeparator.hidden = YES;
+    // Return focus to window (not webview — avoids spurious focus events)
+    [ui->window makeFirstResponder:nil];
+}
+
+void ui_toggle_sidebar(SwimUI *ui) {
+    if (ui->sidebar_visible) {
+        ui_hide_sidebar(ui);
+    } else {
+        ui_show_sidebar(ui);
+    }
+}
+
+bool ui_sidebar_visible(SwimUI *ui) {
+    return ui->sidebar_visible;
+}
+
+void ui_sidebar_submit(SwimUI *ui, const char *prompt) {
+    ui_show_sidebar(ui);
+    NSString *escaped = [[NSString stringWithUTF8String:prompt]
+        stringByReplacingOccurrencesOfString:@"\\" withString:@"\\\\"];
+    escaped = [escaped stringByReplacingOccurrencesOfString:@"'" withString:@"\\'"];
+    escaped = [escaped stringByReplacingOccurrencesOfString:@"\n" withString:@"\\n"];
+    NSString *js = [NSString stringWithFormat:
+        @"input.value = '%@';"
+        "input.dispatchEvent(new Event('input'));"
+        "var e = new KeyboardEvent('keydown', {key:'Enter'});"
+        "input.dispatchEvent(e);", escaped];
+    [ui->sidebarWebview evaluateJavaScript:js completionHandler:nil];
 }

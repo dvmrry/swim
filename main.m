@@ -358,6 +358,9 @@ static void handle_action(const char *action, void *ctx) {
                 ui_navigate(app.ui, [root UTF8String]);
             }
         }
+    } else if (strcmp(action, "toggle-sidebar") == 0) {
+        ui_toggle_sidebar(app.ui);
+        if (!ui_sidebar_visible(app.ui)) app_set_mode(MODE_NORMAL);
     }
 }
 
@@ -576,6 +579,21 @@ static void cmd_proxy(const char *args, void *ctx) {
     snprintf(app.config.proxy_host, sizeof(app.config.proxy_host), "%s", host);
     app.config.proxy_port = port;
     ui_set_proxy(app.ui, type, host, port);
+}
+
+static void cmd_ai(const char *args, void *ctx) {
+    (void)ctx;
+    if (!args || !args[0]) {
+        ui_toggle_sidebar(app.ui);
+        if (!ui_sidebar_visible(app.ui)) app_set_mode(MODE_NORMAL);
+        return;
+    }
+    if (strcmp(args, "close") == 0) {
+        ui_hide_sidebar(app.ui);
+        app_set_mode(MODE_NORMAL);
+        return;
+    }
+    ui_sidebar_submit(app.ui, args);
 }
 
 static void cmd_focus(const char *args, void *ctx) {
@@ -930,6 +948,24 @@ int main(int argc, const char *argv[]) {
         [NSApplication sharedApplication];
         [NSApp setActivationPolicy:NSApplicationActivationPolicyRegular];
 
+        // Minimal menu bar — Edit menu enables Cmd-C/V/A/X in WKWebView text fields
+        NSMenu *menuBar = [[NSMenu alloc] init];
+        NSMenuItem *appMenuItem = [[NSMenuItem alloc] init];
+        NSMenu *appMenu = [[NSMenu alloc] initWithTitle:@"swim"];
+        [appMenu addItemWithTitle:@"Quit swim" action:@selector(terminate:) keyEquivalent:@"q"];
+        appMenuItem.submenu = appMenu;
+        [menuBar addItem:appMenuItem];
+
+        NSMenuItem *editMenuItem = [[NSMenuItem alloc] init];
+        NSMenu *editMenu = [[NSMenu alloc] initWithTitle:@"Edit"];
+        [editMenu addItemWithTitle:@"Cut" action:@selector(cut:) keyEquivalent:@"x"];
+        [editMenu addItemWithTitle:@"Copy" action:@selector(copy:) keyEquivalent:@"c"];
+        [editMenu addItemWithTitle:@"Paste" action:@selector(paste:) keyEquivalent:@"v"];
+        [editMenu addItemWithTitle:@"Select All" action:@selector(selectAll:) keyEquivalent:@"a"];
+        editMenuItem.submenu = editMenu;
+        [menuBar addItem:editMenuItem];
+        [NSApp setMainMenu:menuBar];
+
         const char *serve_addr = NULL;
         bool serve = false;
         const char *profile = NULL;
@@ -1038,6 +1074,7 @@ int main(int argc, const char *argv[]) {
         registry_add(&app.commands, "mute", NULL, cmd_mute, "Toggle tab audio mute");
         registry_add(&app.commands, "devtools", NULL, cmd_devtools, "Open web inspector");
         registry_add(&app.commands, "proxy", NULL, cmd_proxy, "Set proxy (http|socks5 host:port)");
+        registry_add(&app.commands, "ai", NULL, cmd_ai, "AI sidebar (close|<prompt>)");
 
         // Create UI
         UICallbacks callbacks = {

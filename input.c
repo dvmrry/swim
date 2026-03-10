@@ -116,6 +116,7 @@ void mode_init(ModeManager *m, ActionFn on_action, void *ctx) {
     keytrie_bind(&m->normal_keys, ";y", "hint-yank");
     keytrie_bind(&m->normal_keys, "gu", "navigate-up");
     keytrie_bind(&m->normal_keys, "gU", "navigate-root");
+    keytrie_bind(&m->normal_keys, "ga", "toggle-sidebar");
 }
 
 void mode_set(ModeManager *m, Mode mode) {
