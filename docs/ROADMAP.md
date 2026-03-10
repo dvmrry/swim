@@ -176,10 +176,12 @@ architecture is an asset — don't split until splitting solves a real problem.
 ### Dialog Handling ✓ Shipped
 Auto-respond to alert/confirm/prompt when serving. Queued for agent polling via `/dialog`.
 
-### Iframe Support
-Same-origin: inject JS that traverses `iframe.contentDocument`.
+### Iframe Support (Partial ✓)
+Same-origin: ✓ shipped — extract content, report interactables, allow subframe nav.
 Cross-origin: `WKUserScript` with `forMainFrameOnly:NO` + message passing.
 Enterprise apps (Oracle, SAP) are iframe-heavy — needed for full LOB coverage.
+Also enables iframe-based ad/tracker killing (size heuristic: 1x1 pixels, 300x250 ad slots
+from third-party origins). Debug use case: diagnose Safari PAC proxy + iframe URL mangling.
 
 ### File Upload ✓ Shipped
 Native NSOpenPanel via `runOpenPanelWithParameters:` WKUIDelegate for interactive use.
