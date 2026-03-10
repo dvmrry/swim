@@ -957,7 +957,8 @@ static NSDictionary *do_sleep_step(NSDictionary *json) {
 
 // --- HTTP route handlers (thin wrappers around do_* functions) ---
 
-static void handle_health(int fd) {
+static void handle_health(int fd, ServeContext *ctx) {
+    (void)ctx;
     send_json(fd, 200, "{\"ok\":true}");
 }
 
@@ -1184,6 +1185,50 @@ static void handle_batch(int fd, HTTPRequest *req, ServeContext *ctx) {
     send_dict(fd, response);
 }
 
+// --- Route table ---
+
+typedef void (*get_handler_fn)(int fd, ServeContext *ctx);
+typedef void (*post_handler_fn)(int fd, HTTPRequest *req, ServeContext *ctx);
+
+typedef struct {
+    const char *method;
+    const char *path;
+    union {
+        get_handler_fn get;
+        post_handler_fn post;
+    } fn;
+} Route;
+
+static const Route routes[] = {
+    {"GET",  "/health",     {.get  = handle_health}},
+    {"GET",  "/state",      {.get  = handle_state}},
+    {"GET",  "/screenshot", {.get  = handle_screenshot}},
+    {"GET",  "/pdf",        {.get  = handle_pdf}},
+    {"GET",  "/extract",    {.get  = handle_extract}},
+    {"GET",  "/interact",   {.get  = handle_interact}},
+    {"GET",  "/console",    {.get  = handle_console}},
+    {"GET",  "/dialog",     {.get  = handle_dialog}},
+    {"POST", "/action",     {.post = handle_action}},
+    {"POST", "/command",    {.post = handle_command}},
+    {"POST", "/key",        {.post = handle_key}},
+    {"POST", "/resize",     {.post = handle_resize}},
+    {"POST", "/wait",       {.post = handle_wait}},
+    {"POST", "/wait_for",   {.post = handle_wait_for}},
+    {"POST", "/eval",       {.post = handle_eval}},
+    {"POST", "/fill",       {.post = handle_fill}},
+    {"POST", "/click",      {.post = handle_click}},
+    {"POST", "/query",      {.post = handle_query}},
+    {"POST", "/tab",        {.post = handle_tab}},
+    {"POST", "/select",     {.post = handle_select}},
+    {"POST", "/scroll",     {.post = handle_scroll}},
+    {"POST", "/storage",    {.post = handle_storage}},
+    {"POST", "/hover",      {.post = handle_hover}},
+    {"POST", "/drag",       {.post = handle_drag}},
+    {"POST", "/batch",      {.post = handle_batch}},
+};
+
+static const int route_count = sizeof(routes) / sizeof(routes[0]);
+
 // --- Server thread ---
 
 static void *server_thread(void *arg) {
@@ -1199,59 +1244,20 @@ static void *server_thread(void *arg) {
             continue;
         }
 
-        if (strcmp(req.method, "GET") == 0 && strcmp(req.path, "/health") == 0) {
-            handle_health(client_fd);
-        } else if (strcmp(req.method, "POST") == 0 && strcmp(req.path, "/action") == 0) {
-            handle_action(client_fd, &req, ctx);
-        } else if (strcmp(req.method, "POST") == 0 && strcmp(req.path, "/command") == 0) {
-            handle_command(client_fd, &req, ctx);
-        } else if (strcmp(req.method, "POST") == 0 && strcmp(req.path, "/key") == 0) {
-            handle_key(client_fd, &req, ctx);
-        } else if (strcmp(req.method, "GET") == 0 && strcmp(req.path, "/screenshot") == 0) {
-            handle_screenshot(client_fd, ctx);
-        } else if (strcmp(req.method, "GET") == 0 && strcmp(req.path, "/pdf") == 0) {
-            handle_pdf(client_fd, ctx);
-        } else if (strcmp(req.method, "GET") == 0 && strcmp(req.path, "/state") == 0) {
-            handle_state(client_fd, ctx);
-        } else if (strcmp(req.method, "POST") == 0 && strcmp(req.path, "/resize") == 0) {
-            handle_resize(client_fd, &req, ctx);
-        } else if (strcmp(req.method, "POST") == 0 && strcmp(req.path, "/wait") == 0) {
-            handle_wait(client_fd, &req, ctx);
-        } else if (strcmp(req.method, "POST") == 0 && strcmp(req.path, "/wait_for") == 0) {
-            handle_wait_for(client_fd, &req, ctx);
-        } else if (strcmp(req.method, "POST") == 0 && strcmp(req.path, "/eval") == 0) {
-            handle_eval(client_fd, &req, ctx);
-        } else if (strcmp(req.method, "GET") == 0 && strcmp(req.path, "/extract") == 0) {
-            handle_extract(client_fd, ctx);
-        } else if (strcmp(req.method, "GET") == 0 && strcmp(req.path, "/interact") == 0) {
-            handle_interact(client_fd, ctx);
-        } else if (strcmp(req.method, "GET") == 0 && strcmp(req.path, "/console") == 0) {
-            handle_console(client_fd, ctx);
-        } else if (strcmp(req.method, "POST") == 0 && strcmp(req.path, "/fill") == 0) {
-            handle_fill(client_fd, &req, ctx);
-        } else if (strcmp(req.method, "POST") == 0 && strcmp(req.path, "/click") == 0) {
-            handle_click(client_fd, &req, ctx);
-        } else if (strcmp(req.method, "POST") == 0 && strcmp(req.path, "/query") == 0) {
-            handle_query(client_fd, &req, ctx);
-        } else if (strcmp(req.method, "POST") == 0 && strcmp(req.path, "/tab") == 0) {
-            handle_tab(client_fd, &req, ctx);
-        } else if (strcmp(req.method, "POST") == 0 && strcmp(req.path, "/select") == 0) {
-            handle_select(client_fd, &req, ctx);
-        } else if (strcmp(req.method, "POST") == 0 && strcmp(req.path, "/scroll") == 0) {
-            handle_scroll(client_fd, &req, ctx);
-        } else if (strcmp(req.method, "POST") == 0 && strcmp(req.path, "/storage") == 0) {
-            handle_storage(client_fd, &req, ctx);
-        } else if (strcmp(req.method, "POST") == 0 && strcmp(req.path, "/hover") == 0) {
-            handle_hover(client_fd, &req, ctx);
-        } else if (strcmp(req.method, "POST") == 0 && strcmp(req.path, "/drag") == 0) {
-            handle_drag(client_fd, &req, ctx);
-        } else if (strcmp(req.method, "GET") == 0 && strcmp(req.path, "/dialog") == 0) {
-            handle_dialog(client_fd, ctx);
-        } else if (strcmp(req.method, "POST") == 0 && strcmp(req.path, "/batch") == 0) {
-            handle_batch(client_fd, &req, ctx);
-        } else {
-            send_json(client_fd, 404, "{\"error\":\"not found\"}");
+        bool handled = false;
+        for (int i = 0; i < route_count; i++) {
+            if (strcmp(req.method, routes[i].method) == 0 &&
+                strcmp(req.path, routes[i].path) == 0) {
+                if (strcmp(req.method, "GET") == 0)
+                    routes[i].fn.get(client_fd, ctx);
+                else
+                    routes[i].fn.post(client_fd, &req, ctx);
+                handled = true;
+                break;
+            }
         }
+        if (!handled)
+            send_json(client_fd, 404, "{\"error\":\"not found\"}");
 
         free(req.body);
         close(client_fd);
