@@ -169,9 +169,8 @@ architecture is an asset — don't split until splitting solves a real problem.
 
 ## Maturity Roadmap
 
-### Dialog Handling
-WebKit `WKUIDelegate` methods for alert/confirm/prompt. Auto-respond or queue
-for agent poll/response. Prevents JS dialogs from blocking the API.
+### Dialog Handling ✓ Shipped
+Auto-respond to alert/confirm/prompt when serving. Queued for agent polling via `/dialog`.
 
 ### Iframe Support
 Same-origin: inject JS that traverses `iframe.contentDocument`.
@@ -187,14 +186,11 @@ WKWebView doesn't expose network layer. Options: custom URL protocol handler
 (`WKURLSchemeHandler`), or inject `fetch`/`XMLHttpRequest` wrapper JS.
 Highest complexity of remaining features.
 
-### Drag and Drop
-Mouse event sequence: mousedown → mousemove → mouseup. Needs coordinate
-calculation from element bounding rects. Medium effort.
+### Drag and Drop ✓ Shipped
+`/drag` dispatches mousedown/mousemove/mouseup + HTML5 drag events between two selectors.
 
-### JS-Heavy Page Extraction
-`/extract` returns empty on SPAs that render via JS (React, Vue, GitHub).
-Options: wait for idle, use innerText instead of readability heuristics,
-or fall back to accessibility tree approach.
+### JS-Heavy Page Extraction ✓ Shipped
+`/extract` falls back to `innerText` when markdown conversion returns <100 chars.
 
 ---
 
