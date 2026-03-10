@@ -128,41 +128,9 @@ static NSString *js_escape_sq(NSString *s) {
 }
 
 // Evaluate JS on main thread, parse JSON string result, wait with timeout.
-// Used by most do_* functions that run JS and return a parsed dict.
-static NSDictionary *eval_js_sync(ServeContext *ctx, NSString *js, NSString *label, double timeout_sec) {
-    __block NSDictionary *result = nil;
-    dispatch_sync(dispatch_get_main_queue(), ^{
-        WKWebView *wv = (__bridge WKWebView *)ui_get_active_webview(ctx->ui);
-        if (!wv) { result = @{@"ok": @NO, @"error": @"no active webview"}; return; }
-
-        __block BOOL done = NO;
-        __block NSDictionary *response = nil;
-
-        [wv evaluateJavaScript:js completionHandler:^(id res, NSError *error) {
-            if (error) {
-                response = @{@"ok": @NO, @"error": error.localizedDescription ?: @"unknown"};
-            } else if (res && [res isKindOfClass:[NSString class]]) {
-                NSData *data = [(NSString *)res dataUsingEncoding:NSUTF8StringEncoding];
-                response = [NSJSONSerialization JSONObjectWithData:data options:0 error:nil];
-            }
-            done = YES;
-        }];
-
-        NSDate *deadline = [NSDate dateWithTimeIntervalSinceNow:timeout_sec];
-        while (!done && [[NSRunLoop currentRunLoop] runMode:NSDefaultRunLoopMode
-                                                beforeDate:deadline]) {
-            if ([deadline timeIntervalSinceNow] <= 0) break;
-        }
-
-        if (!done) result = @{@"ok": @NO, @"error": [label stringByAppendingString:@" timeout"]};
-        else if (response) result = response;
-        else result = @{@"ok": @NO, @"error": [label stringByAppendingString:@" failed"]};
-    });
-    return result ?: @{@"ok": @NO, @"error": [label stringByAppendingString:@" failed"]};
-}
-
-// Like eval_js_sync but injects ok:YES into the parsed result (for extract/interact).
-static NSDictionary *eval_js_sync_inject_ok(ServeContext *ctx, NSString *js, NSString *label, double timeout_sec) {
+// If inject_ok is true, adds ok:YES to the parsed result (for extract/interact).
+static NSDictionary *eval_js_sync(ServeContext *ctx, NSString *js, NSString *label,
+                                   double timeout_sec, bool inject_ok) {
     __block NSDictionary *result = nil;
     dispatch_sync(dispatch_get_main_queue(), ^{
         WKWebView *wv = (__bridge WKWebView *)ui_get_active_webview(ctx->ui);
@@ -177,15 +145,13 @@ static NSDictionary *eval_js_sync_inject_ok(ServeContext *ctx, NSString *js, NSS
             } else if (res && [res isKindOfClass:[NSString class]]) {
                 NSData *data = [(NSString *)res dataUsingEncoding:NSUTF8StringEncoding];
                 NSDictionary *parsed = [NSJSONSerialization JSONObjectWithData:data options:0 error:nil];
-                if (parsed) {
+                if (inject_ok && parsed) {
                     NSMutableDictionary *r = [parsed mutableCopy];
                     r[@"ok"] = @YES;
                     response = r;
                 } else {
-                    response = @{@"ok": @NO, @"error": @"parse failed"};
+                    response = parsed;
                 }
-            } else {
-                response = @{@"ok": @NO, @"error": @"no result"};
             }
             done = YES;
         }];
@@ -521,11 +487,11 @@ static NSDictionary *do_eval(NSDictionary *json, ServeContext *ctx) {
 }
 
 static NSDictionary *do_extract(ServeContext *ctx) {
-    return eval_js_sync_inject_ok(ctx, [NSString stringWithUTF8String:kExtractJS], @"extract", 10.0);
+    return eval_js_sync(ctx, [NSString stringWithUTF8String:kExtractJS], @"extract", 10.0, true);
 }
 
 static NSDictionary *do_interact(ServeContext *ctx) {
-    return eval_js_sync_inject_ok(ctx, [NSString stringWithUTF8String:kInteractJS], @"interact", 10.0);
+    return eval_js_sync(ctx, [NSString stringWithUTF8String:kInteractJS], @"interact", 10.0, true);
 }
 
 static NSDictionary *do_fill(NSDictionary *json, ServeContext *ctx) {
@@ -584,7 +550,7 @@ static NSDictionary *do_fill(NSDictionary *json, ServeContext *ctx) {
 
     [js appendString:@"return JSON.stringify({ok:true,results:results})})()"];
 
-    return eval_js_sync(ctx, js, @"fill", 5.0);
+    return eval_js_sync(ctx, js, @"fill", 5.0, false);
 }
 
 static NSDictionary *do_click(NSDictionary *json, ServeContext *ctx) {
@@ -613,7 +579,7 @@ static NSDictionary *do_click(NSDictionary *json, ServeContext *ctx) {
             "})()", escaped];
     }
 
-    return eval_js_sync(ctx, js, @"click", 5.0);
+    return eval_js_sync(ctx, js, @"click", 5.0, false);
 }
 
 // --- Feature: /query — read element text, attributes, visibility ---
@@ -683,7 +649,7 @@ static NSDictionary *do_query(NSDictionary *json, ServeContext *ctx) {
 
     [js appendString:@"})()"];
 
-    return eval_js_sync(ctx, js, @"query", 5.0);
+    return eval_js_sync(ctx, js, @"query", 5.0, false);
 }
 
 // --- Feature: /wait_for with url_contains for navigation wait ---
@@ -768,7 +734,7 @@ static NSDictionary *do_select(NSDictionary *json, ServeContext *ctx) {
 
     [js appendString:@"})()"];
 
-    return eval_js_sync(ctx, js, @"select", 5.0);
+    return eval_js_sync(ctx, js, @"select", 5.0, false);
 }
 
 // --- Feature: /scroll — scroll element into view ---
@@ -793,7 +759,7 @@ static NSDictionary *do_scroll(NSDictionary *json, ServeContext *ctx) {
         "        width:Math.round(r.width),height:Math.round(r.height)}})"
         "})()", escapedSel, behavior, block];
 
-    return eval_js_sync(ctx, js, @"scroll", 5.0);
+    return eval_js_sync(ctx, js, @"scroll", 5.0, false);
 }
 
 // --- Feature: /storage — read/write cookies, localStorage, sessionStorage ---
@@ -888,7 +854,7 @@ static NSDictionary *do_storage(NSDictionary *json, ServeContext *ctx) {
 
     [js appendString:@"}catch(e){return JSON.stringify({ok:false,error:e.message})}})()"];
 
-    return eval_js_sync(ctx, js, @"storage", 5.0);
+    return eval_js_sync(ctx, js, @"storage", 5.0, false);
 }
 
 static NSDictionary *do_hover(NSDictionary *json, ServeContext *ctx) {
@@ -905,7 +871,7 @@ static NSDictionary *do_hover(NSDictionary *json, ServeContext *ctx) {
         "return JSON.stringify({ok:true})"
         "})()", escaped];
 
-    return eval_js_sync(ctx, js, @"hover", 5.0);
+    return eval_js_sync(ctx, js, @"hover", 5.0, false);
 }
 
 static NSDictionary *do_dialog(ServeContext *ctx) {
@@ -953,7 +919,7 @@ static NSDictionary *do_drag(NSDictionary *json, ServeContext *ctx) {
         "return JSON.stringify({ok:true,from:{x:sx,y:sy},to:{x:dx,y:dy}})"
         "})()", escapedFrom, escapedTo];
 
-    return eval_js_sync(ctx, js, @"drag", 5.0);
+    return eval_js_sync(ctx, js, @"drag", 5.0, false);
 }
 
 static NSDictionary *do_console(ServeContext *ctx) {
@@ -977,7 +943,7 @@ static NSDictionary *do_console(ServeContext *ctx) {
         "return JSON.stringify({ok:true,messages:msgs,count:msgs.length})"
         "})()";
 
-    return eval_js_sync(ctx, js, @"console", 5.0);
+    return eval_js_sync(ctx, js, @"console", 5.0, false);
 }
 
 static NSDictionary *do_sleep_step(NSDictionary *json) {
@@ -1114,52 +1080,27 @@ static void handle_dialog(int fd, ServeContext *ctx) {
 }
 
 static void handle_query(int fd, HTTPRequest *req, ServeContext *ctx) {
-    if (!req->body || req->body_len <= 0) {
-        send_json(fd, 400, "{\"error\":\"missing body\"}");
-        return;
-    }
-    NSData *data = [NSData dataWithBytes:req->body length:req->body_len];
-    NSDictionary *json = [NSJSONSerialization JSONObjectWithData:data options:0 error:nil];
+    NSDictionary *json = parse_json_body(req->body, req->body_len);
     send_dict(fd, do_query(json, ctx));
 }
 
 static void handle_tab(int fd, HTTPRequest *req, ServeContext *ctx) {
-    if (!req->body || req->body_len <= 0) {
-        send_json(fd, 400, "{\"error\":\"missing body\"}");
-        return;
-    }
-    NSData *data = [NSData dataWithBytes:req->body length:req->body_len];
-    NSDictionary *json = [NSJSONSerialization JSONObjectWithData:data options:0 error:nil];
+    NSDictionary *json = parse_json_body(req->body, req->body_len);
     send_dict(fd, do_tab(json, ctx));
 }
 
 static void handle_select(int fd, HTTPRequest *req, ServeContext *ctx) {
-    if (!req->body || req->body_len <= 0) {
-        send_json(fd, 400, "{\"error\":\"missing body\"}");
-        return;
-    }
-    NSData *data = [NSData dataWithBytes:req->body length:req->body_len];
-    NSDictionary *json = [NSJSONSerialization JSONObjectWithData:data options:0 error:nil];
+    NSDictionary *json = parse_json_body(req->body, req->body_len);
     send_dict(fd, do_select(json, ctx));
 }
 
 static void handle_scroll(int fd, HTTPRequest *req, ServeContext *ctx) {
-    if (!req->body || req->body_len <= 0) {
-        send_json(fd, 400, "{\"error\":\"missing body\"}");
-        return;
-    }
-    NSData *data = [NSData dataWithBytes:req->body length:req->body_len];
-    NSDictionary *json = [NSJSONSerialization JSONObjectWithData:data options:0 error:nil];
+    NSDictionary *json = parse_json_body(req->body, req->body_len);
     send_dict(fd, do_scroll(json, ctx));
 }
 
 static void handle_storage(int fd, HTTPRequest *req, ServeContext *ctx) {
-    if (!req->body || req->body_len <= 0) {
-        send_json(fd, 400, "{\"error\":\"missing body\"}");
-        return;
-    }
-    NSData *data = [NSData dataWithBytes:req->body length:req->body_len];
-    NSDictionary *json = [NSJSONSerialization JSONObjectWithData:data options:0 error:nil];
+    NSDictionary *json = parse_json_body(req->body, req->body_len);
     send_dict(fd, do_storage(json, ctx));
 }
 
