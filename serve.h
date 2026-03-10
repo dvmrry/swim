@@ -15,8 +15,10 @@ typedef struct ServeContext {
     void *action_ctx;
 } ServeContext;
 
-// Starts HTTP server on given port in a background thread.
+// Starts HTTP server in a background thread.
+// addr: port number string ("9111") for TCP, or file path for Unix socket.
+// NULL defaults to ~/.config/swim/swim.sock
 // ctx must remain valid for the lifetime of the server.
-void serve_start(int port, ServeContext *ctx);
+void serve_start(const char *addr, ServeContext *ctx);
 
 #endif

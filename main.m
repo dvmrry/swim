@@ -930,10 +930,17 @@ int main(int argc, const char *argv[]) {
         [NSApplication sharedApplication];
         [NSApp setActivationPolicy:NSApplicationActivationPolicyRegular];
 
-        int serve_port = 0;
+        const char *serve_addr = NULL;
+        bool serve = false;
         for (int i = 1; i < argc; i++) {
-            if (strcmp(argv[i], "--serve") == 0 && i + 1 < argc) {
-                serve_port = atoi(argv[++i]);
+            if (strcmp(argv[i], "--serve") == 0) {
+                serve = true;
+                // Next arg is addr if it's a port number or path (starts with / or .)
+                if (i + 1 < argc) {
+                    char c = argv[i + 1][0];
+                    if (c == '/' || c == '.' || (c >= '0' && c <= '9'))
+                        serve_addr = argv[++i];
+                }
             }
         }
 
@@ -1057,7 +1064,10 @@ int main(int argc, const char *argv[]) {
             // CLI arguments: ./swim url1 url2 ...
             for (int i = 1; i < argc; i++) {
                 if (argv[i][0] == '-') {
-                    if (strcmp(argv[i], "--serve") == 0 && i + 1 < argc) i++;
+                    if (strcmp(argv[i], "--serve") == 0 && i + 1 < argc) {
+                        char c = argv[i + 1][0];
+                        if (c == '/' || c == '.' || (c >= '0' && c <= '9')) i++;
+                    }
                     continue;
                 }
                 create_tab(argv[i]);
@@ -1086,7 +1096,7 @@ int main(int argc, const char *argv[]) {
             }
         }
 
-        if (serve_port > 0) {
+        if (serve) {
             static ServeContext serve_ctx;
             serve_ctx = (ServeContext){
                 .ui = app.ui,
@@ -1096,7 +1106,7 @@ int main(int argc, const char *argv[]) {
                 .handle_action = handle_action,
                 .action_ctx = &app,
             };
-            serve_start(serve_port, &serve_ctx);
+            serve_start(serve_addr, &serve_ctx);
         }
 
         // Key event monitor

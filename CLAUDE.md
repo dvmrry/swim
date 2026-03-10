@@ -23,7 +23,9 @@ make clean  # removes binary
 ## API Server
 
 ```
-swim --serve 9111    # start with HTTP API on port 9111
+swim --serve          # Unix socket at ~/.config/swim/swim.sock (default)
+swim --serve 9111     # TCP port 9111
+swim --serve /tmp/s   # Unix socket at custom path
 ```
 
 Endpoints: /health, /state, /screenshot, /pdf, /extract, /interact, /click, /hover, /drag, /fill, /upload, /select, /query, /scroll, /storage, /console, /dialog, /requests, /tab, /wait, /wait_for, /action, /command, /key, /eval, /batch, /resize
@@ -31,7 +33,8 @@ Endpoints: /health, /state, /screenshot, /pdf, /extract, /interact, /click, /hov
 ## MCP Integration
 
 ```
-swim-mcp --port 9111  # MCP sidecar (add to Claude Code mcp.json)
+swim-mcp              # connects via Unix socket (default)
+swim-mcp --port 9111  # connects via TCP
 ```
 
 Tools: navigate, screenshot, extract, interact, fill, upload, select, query, scroll, storage, tab, wait_for, execute, action, state, click, key, hover, console, navigate_back, navigate_forward, pdf, eval, drag, dialog, requests

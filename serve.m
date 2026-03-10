@@ -1,6 +1,7 @@
 #import <Cocoa/Cocoa.h>
 #import <WebKit/WebKit.h>
 #include <sys/socket.h>
+#include <sys/un.h>
 #include <netinet/in.h>
 #include <pthread.h>
 #include <unistd.h>
@@ -1408,27 +1409,75 @@ static void *server_thread(void *arg) {
 
 // --- Public API ---
 
-void serve_start(int port, ServeContext *ctx) {
-    int fd = socket(AF_INET, SOCK_STREAM, 0);
-    if (fd < 0) { perror("socket"); return; }
+static bool is_all_digits(const char *s) {
+    if (!s || !*s) return false;
+    for (; *s; s++) if (*s < '0' || *s > '9') return false;
+    return true;
+}
 
-    int yes = 1;
-    setsockopt(fd, SOL_SOCKET, SO_REUSEADDR, &yes, sizeof(yes));
+static char g_socket_path[256];
 
-    struct sockaddr_in addr = {
-        .sin_family = AF_INET,
-        .sin_port = htons(port),
-        .sin_addr.s_addr = htonl(INADDR_LOOPBACK),
-    };
+static void cleanup_socket(void) {
+    if (g_socket_path[0]) unlink(g_socket_path);
+}
 
-    if (bind(fd, (struct sockaddr *)&addr, sizeof(addr)) < 0) {
-        perror("bind"); close(fd); return;
+void serve_start(const char *addr, ServeContext *ctx) {
+    int fd;
+
+    if (!addr || !is_all_digits(addr)) {
+        // Unix domain socket
+        const char *path = addr;
+        char default_path[256];
+        if (!path) {
+            const char *home = getenv("HOME");
+            snprintf(default_path, sizeof(default_path),
+                     "%s/.config/swim/swim.sock", home ? home : "/tmp");
+            path = default_path;
+        }
+
+        fd = socket(AF_UNIX, SOCK_STREAM, 0);
+        if (fd < 0) { perror("socket"); return; }
+
+        struct sockaddr_un un_addr = { .sun_family = AF_UNIX };
+        strlcpy(un_addr.sun_path, path, sizeof(un_addr.sun_path));
+
+        // Remove stale socket file
+        unlink(path);
+
+        if (bind(fd, (struct sockaddr *)&un_addr, sizeof(un_addr)) < 0) {
+            perror("bind"); close(fd); return;
+        }
+        if (listen(fd, 5) < 0) {
+            perror("listen"); close(fd); return;
+        }
+
+        strlcpy(g_socket_path, path, sizeof(g_socket_path));
+        atexit(cleanup_socket);
+        fprintf(stderr, "swim: serving on %s\n", path);
+    } else {
+        // TCP socket
+        int port = atoi(addr);
+        fd = socket(AF_INET, SOCK_STREAM, 0);
+        if (fd < 0) { perror("socket"); return; }
+
+        int yes = 1;
+        setsockopt(fd, SOL_SOCKET, SO_REUSEADDR, &yes, sizeof(yes));
+
+        struct sockaddr_in in_addr = {
+            .sin_family = AF_INET,
+            .sin_port = htons(port),
+            .sin_addr.s_addr = htonl(INADDR_LOOPBACK),
+        };
+
+        if (bind(fd, (struct sockaddr *)&in_addr, sizeof(in_addr)) < 0) {
+            perror("bind"); close(fd); return;
+        }
+        if (listen(fd, 5) < 0) {
+            perror("listen"); close(fd); return;
+        }
+
+        fprintf(stderr, "swim: serving on port %d\n", port);
     }
-    if (listen(fd, 5) < 0) {
-        perror("listen"); close(fd); return;
-    }
-
-    fprintf(stderr, "swim: serving on port %d\n", port);
 
     // Enable serving mode for dialog auto-response
     dispatch_async(dispatch_get_main_queue(), ^{

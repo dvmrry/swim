@@ -2,7 +2,7 @@
   "mcpServers": {
     "swim": {
       "command": "/Users/dm/src/gh/dvmrry/swim/swim-mcp",
-      "args": ["--port", "9111"],
+      "args": [],
       "autoApprove": ["swim"]
     }
   }

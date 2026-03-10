@@ -4,6 +4,7 @@
 #include <stdbool.h>
 #include <unistd.h>
 #include <sys/socket.h>
+#include <sys/un.h>
 #include <netinet/in.h>
 #include <arpa/inet.h>
 #include <signal.h>
@@ -11,7 +12,8 @@
 
 // --- Configuration ---
 
-static int g_port = 9111;
+static int g_port = 0;
+static char g_socket_path[256];
 
 // --- Simple JSON helpers (no dependencies) ---
 
@@ -110,18 +112,28 @@ static char *json_get_object(const char *json, const char *key) {
 
 static char *http_request(const char *method, const char *path,
                           const char *body, int *out_len) {
-    int fd = socket(AF_INET, SOCK_STREAM, 0);
-    if (fd < 0) return NULL;
-
-    struct sockaddr_in addr = {
-        .sin_family = AF_INET,
-        .sin_port = htons(g_port),
-        .sin_addr.s_addr = htonl(INADDR_LOOPBACK),
-    };
-
-    if (connect(fd, (struct sockaddr *)&addr, sizeof(addr)) < 0) {
-        close(fd);
-        return NULL;
+    int fd;
+    if (g_port > 0) {
+        fd = socket(AF_INET, SOCK_STREAM, 0);
+        if (fd < 0) return NULL;
+        struct sockaddr_in addr = {
+            .sin_family = AF_INET,
+            .sin_port = htons(g_port),
+            .sin_addr.s_addr = htonl(INADDR_LOOPBACK),
+        };
+        if (connect(fd, (struct sockaddr *)&addr, sizeof(addr)) < 0) {
+            close(fd);
+            return NULL;
+        }
+    } else {
+        fd = socket(AF_UNIX, SOCK_STREAM, 0);
+        if (fd < 0) return NULL;
+        struct sockaddr_un addr = { .sun_family = AF_UNIX };
+        strlcpy(addr.sun_path, g_socket_path, sizeof(addr.sun_path));
+        if (connect(fd, (struct sockaddr *)&addr, sizeof(addr)) < 0) {
+            close(fd);
+            return NULL;
+        }
     }
 
     // Send request
@@ -809,7 +821,16 @@ int main(int argc, char *argv[]) {
     for (int i = 1; i < argc; i++) {
         if (strcmp(argv[i], "--port") == 0 && i + 1 < argc) {
             g_port = atoi(argv[++i]);
+        } else if (strcmp(argv[i], "--socket") == 0 && i + 1 < argc) {
+            strlcpy(g_socket_path, argv[++i], sizeof(g_socket_path));
         }
+    }
+
+    // Default to Unix socket if no port specified
+    if (g_port == 0 && g_socket_path[0] == '\0') {
+        const char *home = getenv("HOME");
+        snprintf(g_socket_path, sizeof(g_socket_path),
+                 "%s/.config/swim/swim.sock", home ? home : "/tmp");
     }
 
     // Ignore SIGPIPE (can happen on closed sockets)
@@ -817,7 +838,8 @@ int main(int argc, char *argv[]) {
 
     // Debug: log to file
     FILE *dbg = fopen("/tmp/swim-mcp.log", "w");
-    if (dbg) { fprintf(dbg, "started, port=%d, stdin=%d, stdout=%d\n", g_port, STDIN_FILENO, STDOUT_FILENO); fflush(dbg); }
+    const char *conn_info = g_port > 0 ? "tcp" : g_socket_path;
+    if (dbg) { fprintf(dbg, "started, connect=%s, stdin=%d, stdout=%d\n", conn_info, STDIN_FILENO, STDOUT_FILENO); fflush(dbg); }
     g_dbg = dbg;
 
     // MCP message loop
