@@ -3,6 +3,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <ctype.h>
+#include <sys/stat.h>
 
 static void add_search_shortcut(Config *c, const char *prefix, const char *url_template) {
     if (c->search_shortcut_count >= 16) return;
@@ -95,6 +96,37 @@ void config_load(Config *c, const char *filepath) {
     }
 
     fclose(f);
+}
+
+static void write_if_missing(const char *path, const char *content) {
+    struct stat st;
+    if (stat(path, &st) == 0) return;
+    FILE *f = fopen(path, "w");
+    if (!f) return;
+    fputs(content, f);
+    fclose(f);
+}
+
+void config_create_default_profiles(const char *dir_path) {
+    char path[512];
+
+    snprintf(path, sizeof(path), "%s/casual.toml", dir_path);
+    write_if_missing(path,
+        "# swim profile: casual\n"
+        "# Visible UI elements, larger text\n"
+        "[appearance]\n"
+        "tab_bar = \"always\"\n"
+        "status_bar = \"always\"\n"
+        "font_size = 16\n");
+
+    snprintf(path, sizeof(path), "%s/minimal.toml", dir_path);
+    write_if_missing(path,
+        "# swim profile: minimal\n"
+        "# Hide everything, maximum content space\n"
+        "[appearance]\n"
+        "tab_bar = \"never\"\n"
+        "status_bar = \"never\"\n"
+        "compact_titlebar = true\n");
 }
 
 bool config_set(Config *c, const char *key, const char *value) {

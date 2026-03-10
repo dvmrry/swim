@@ -26,6 +26,7 @@ make clean  # removes binary
 swim --serve          # Unix socket at ~/.config/swim/swim.sock (default)
 swim --serve 9111     # TCP port 9111
 swim --serve /tmp/s   # Unix socket at custom path
+swim --profile casual # load ~/.config/swim/profiles/casual.toml overlay
 ```
 
 Endpoints: /health, /state, /screenshot, /pdf, /extract, /interact, /click, /hover, /drag, /fill, /upload, /select, /query, /scroll, /storage, /console, /dialog, /requests, /tab, /wait, /wait_for, /action, /command, /key, /eval, /batch, /resize

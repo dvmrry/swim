@@ -16,6 +16,8 @@ void storage_ensure_dir(void) {
     mkdir(path, 0700);
     snprintf(path, sizeof(path), "%s/.config/swim", home);
     mkdir(path, 0700);
+    snprintf(path, sizeof(path), "%s/.config/swim/profiles", home);
+    mkdir(path, 0700);
 }
 
 void storage_init(Storage *s, const char *filepath) {

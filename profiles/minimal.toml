@@ -1,0 +1,6 @@
+# swim profile: minimal
+# Hide everything, maximum content space
+[appearance]
+tab_bar = "never"
+status_bar = "never"
+compact_titlebar = true

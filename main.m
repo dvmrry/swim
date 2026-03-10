@@ -932,15 +932,17 @@ int main(int argc, const char *argv[]) {
 
         const char *serve_addr = NULL;
         bool serve = false;
+        const char *profile = NULL;
         for (int i = 1; i < argc; i++) {
             if (strcmp(argv[i], "--serve") == 0) {
                 serve = true;
-                // Next arg is addr if it's a port number or path (starts with / or .)
                 if (i + 1 < argc) {
                     char c = argv[i + 1][0];
                     if (c == '/' || c == '.' || (c >= '0' && c <= '9'))
                         serve_addr = argv[++i];
                 }
+            } else if (strcmp(argv[i], "--profile") == 0 && i + 1 < argc) {
+                profile = argv[++i];
             }
         }
 
@@ -950,9 +952,23 @@ int main(int argc, const char *argv[]) {
         // Load config
         config_init(&app.config);
         const char *home = getenv("HOME");
+        {
+            char profiles_dir[512];
+            snprintf(profiles_dir, sizeof(profiles_dir),
+                "%s/.config/swim/profiles", home ? home : ".");
+            config_create_default_profiles(profiles_dir);
+        }
         snprintf(app.config_path, sizeof(app.config_path),
             "%s/.config/swim/config.toml", home ? home : ".");
         config_load(&app.config, app.config_path);
+
+        // Apply profile overlay
+        if (profile) {
+            char profile_path[512];
+            snprintf(profile_path, sizeof(profile_path),
+                "%s/.config/swim/profiles/%s.toml", home ? home : ".", profile);
+            config_load(&app.config, profile_path);
+        }
 
         // Init storage
         char bm_path[512], hist_path[512];
@@ -1067,6 +1083,8 @@ int main(int argc, const char *argv[]) {
                     if (strcmp(argv[i], "--serve") == 0 && i + 1 < argc) {
                         char c = argv[i + 1][0];
                         if (c == '/' || c == '.' || (c >= '0' && c <= '9')) i++;
+                    } else if (strcmp(argv[i], "--profile") == 0 && i + 1 < argc) {
+                        i++;
                     }
                     continue;
                 }

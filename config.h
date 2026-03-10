@@ -54,4 +54,7 @@ bool config_set(Config *c, const char *key, const char *value);
 // Write current config to file
 void config_save(Config *c, const char *filepath);
 
+// Create default profile files in dir_path if they don't exist
+void config_create_default_profiles(const char *dir_path);
+
 #endif

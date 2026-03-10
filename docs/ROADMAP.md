@@ -49,14 +49,13 @@ Cursor, and other MCP clients can use it as a real browser tool.
 Chromium instance with no user config. swim gives AI access to *your*
 browser — your sessions, bookmarks, adblock, dark mode, userscripts.
 
-### 1.2 Profiles (`swim --profile <name>`)
-Different default configs for different use cases. Same binary, same code.
+### 1.2 Profiles (`swim --profile <name>`) ✓ Shipped
+Config file overlays at `~/.config/swim/profiles/<name>.toml`.
+Same binary, same code — profile just overrides base config values.
 
-- `default` — current minimal vi-mode setup
 - `casual` — tab bar always, larger fonts, visible status bar
-- `headless` — no window, API-only (for batch/automation)
-
-Profile = config file overlay, not code branches.
+- `minimal` — hide everything, maximum content space
+- Custom profiles: create any `<name>.toml` in the profiles directory
 
 ### 1.3 Content Extraction API ✓ Shipped
 GET /extract returns structured page content, not just screenshots.
