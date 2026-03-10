@@ -8,3 +8,5 @@ result
 extract_js.inc
 interact_js.inc
 test-screenshots/
+test-ui.sh
+Screenshot*.png

@@ -36,6 +36,11 @@ swim-mcp --port 9111  # MCP sidecar (add to Claude Code mcp.json)
 
 Tools: navigate, screenshot, extract, interact, fill, select, query, scroll, storage, tab, wait_for, execute, action, state, click, key, hover, console, navigate_back, navigate_forward, pdf, eval, drag, dialog
 
+Notes:
+- `navigate` waits for page load (polls until title is non-empty, up to 5s) and returns full page state
+- `wait_for` supports `idle:true` to wait for page stability (readyState complete + no DOM mutations for 500ms)
+- Dialog auto-response: alerts auto-accepted, confirms auto-yes, prompts return default text when serving
+
 ## Conventions
 
 - No Co-Authored-By lines in commits

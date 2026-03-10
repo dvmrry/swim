@@ -404,8 +404,9 @@ static NSDictionary *do_wait(NSDictionary *json, ServeContext *ctx) {
 static NSDictionary *do_wait_for(NSDictionary *json, ServeContext *ctx) {
     NSString *selector = json[@"selector"];
     NSString *url_contains = json[@"url_contains"];
-    if (!selector && !url_contains)
-        return @{@"ok": @NO, @"error": @"missing selector or url_contains"};
+    NSNumber *idle = json[@"idle"];
+    if (!selector && !url_contains && !(idle && [idle boolValue]))
+        return @{@"ok": @NO, @"error": @"missing selector, url_contains, or idle"};
 
     NSNumber *timeout_ms = json[@"timeout"];
     double timeout_sec = timeout_ms ? [timeout_ms doubleValue] / 1000.0 : 10.0;
@@ -413,7 +414,26 @@ static NSDictionary *do_wait_for(NSDictionary *json, ServeContext *ctx) {
     if (timeout_sec < 0.1) timeout_sec = 0.1;
 
     NSString *js;
-    if (selector) {
+    if (idle && [idle boolValue]) {
+        // Wait for page idle: readyState complete + no DOM mutations for 500ms
+        js = @"(function(){"
+            "if(document.readyState!=='complete')return false;"
+            "if(!window.__swim_idle_obs){"
+            "  window.__swim_idle_ts=Date.now();"
+            "  window.__swim_idle_obs=new MutationObserver(function(){"
+            "    window.__swim_idle_ts=Date.now();"
+            "  });"
+            "  window.__swim_idle_obs.observe(document.body||document.documentElement,"
+            "    {childList:true,subtree:true,attributes:true});"
+            "  return false"
+            "}"
+            "if(Date.now()-window.__swim_idle_ts<500)return false;"
+            "window.__swim_idle_obs.disconnect();"
+            "delete window.__swim_idle_obs;"
+            "delete window.__swim_idle_ts;"
+            "return true"
+            "})()";
+    } else if (selector) {
         NSString *escapedSel = js_escape_sq(selector);
         js = [NSString stringWithFormat:
             @"!!document.querySelector('%@')", escapedSel];
