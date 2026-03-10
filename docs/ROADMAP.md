@@ -2,7 +2,7 @@
 
 ## Current State
 
-Minimalist vi-mode browser for macOS. ~5,100 LOC, 217KB binary.
+Minimalist vi-mode browser for macOS. ~6,100 LOC, single binary.
 C/Objective-C, Cocoa + WKWebView. Single developer, AI-assisted.
 
 ### Shipped
@@ -18,7 +18,9 @@ C/Objective-C, Cocoa + WKWebView. Single developer, AI-assisted.
 - Proxy (HTTP/SOCKS5, overrides system), private tabs
 - Variable substitution ({url}, {title}, {clipboard})
 - Count prefix (5j), repeat last action (.)
-- Test server mode (HTTP API: actions, commands, screenshots)
+- HTTP API server (`swim --serve <port>`) with 25 endpoints
+- MCP sidecar (`swim-mcp`) for Claude Code / Cursor integration
+- File upload (native NSOpenPanel via WKUIDelegate)
 
 ---
 
@@ -30,15 +32,18 @@ C/Objective-C, Cocoa + WKWebView. Single developer, AI-assisted.
 Expose swim as an MCP (Model Context Protocol) server so Claude Code,
 Cursor, and other MCP clients can use it as a real browser tool.
 
-**MCP tools to expose:**
-- `navigate(url)` — open URL in active tab
-- `screenshot()` — capture current page as PNG
-- `extract()` — return page content as structured text/markdown
-- `execute(command)` — run any `:command`
-- `action(name)` — trigger any keybinding action
-- `state()` — return current mode, URL, tab list, title
-- `tabs()` — list all open tabs
-- `find(query)` — search page content
+**MCP tools exposed (single meta-tool with `method` param):**
+- `navigate(url)` — open URL, wait for load, return state
+- `screenshot()` / `pdf()` — capture page as PNG or PDF
+- `extract()` — structured text/markdown with links and metadata
+- `interact()` — discover form fields, buttons, selects with selectors
+- `fill(selector, value)` / `select(selector, text)` — form automation
+- `click(selector|text)` / `hover(selector)` / `drag(from, to)`
+- `query(selector)` — read element attributes and text
+- `wait_for(selector|url_contains|idle)` — poll for conditions
+- `execute(command)` / `action(name)` / `key(key)` / `eval(js)`
+- `state()` / `tab(index)` / `navigate_back()` / `navigate_forward()`
+- `scroll(selector)` / `storage(type)` / `console()` / `dialog()`
 
 **Why this matters:** Every other MCP browser tool spawns a separate
 Chromium instance with no user config. swim gives AI access to *your*
@@ -177,14 +182,16 @@ Same-origin: inject JS that traverses `iframe.contentDocument`.
 Cross-origin: `WKUserScript` with `forMainFrameOnly:NO` + message passing.
 Enterprise apps (Oracle, SAP) are iframe-heavy — needed for full LOB coverage.
 
-### File Upload
-WKWebView file input handling. Requires native file picker bypass —
-set file input value programmatically or use `WKOpenPanelParameters` delegate.
+### File Upload ✓ Shipped (Interactive)
+Native NSOpenPanel via `runOpenPanelWithParameters:` WKUIDelegate. Works for
+normal browsing. Programmatic file upload (setting file inputs via API without
+the picker dialog) is not yet supported.
 
 ### Network Request Inspection
-WKWebView doesn't expose network layer. Options: custom URL protocol handler
-(`WKURLSchemeHandler`), or inject `fetch`/`XMLHttpRequest` wrapper JS.
-Highest complexity of remaining features.
+WKWebView doesn't expose the network layer. `WKURLSchemeHandler` only works
+for custom schemes, not https. Best approach: inject fetch/XHR wrapper JS
+(same pattern as console capture) to log JS-initiated requests to a buffer.
+Won't capture image/CSS/iframe loads but covers the 90% automation case.
 
 ### Drag and Drop ✓ Shipped
 `/drag` dispatches mousedown/mousemove/mouseup + HTML5 drag events between two selectors.
@@ -226,4 +233,4 @@ The 300MB browsers got there one "reasonable" feature at a time.
 
 ---
 
-*Last updated: 2026-03-09*
+*Last updated: 2026-03-10*
