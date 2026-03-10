@@ -329,6 +329,31 @@ static char *json_escape(const char *str) {
     return out;
 }
 
+// Helper: GET passthrough — call endpoint, return response or error
+static char *get_passthrough(const char *endpoint) {
+    char *resp = http_get(endpoint);
+    return resp ? resp : strdup("{\"error\":\"connection failed\"}");
+}
+
+// Helper: POST with single string param — extract, escape, post, return
+static char *post_string_param(const char *endpoint, const char *key,
+                                const char *arguments) {
+    char *val = json_get_string(arguments, key);
+    if (!val) {
+        char err[128];
+        snprintf(err, sizeof(err), "{\"error\":\"missing %s\"}", key);
+        return strdup(err);
+    }
+    char *escaped = json_escape(val);
+    int bsize = (int)strlen(escaped) + (int)strlen(key) + 32;
+    char *body = malloc(bsize);
+    snprintf(body, bsize, "{\"%s\":\"%s\"}", key, escaped);
+    free(escaped); free(val);
+    char *resp = http_post(endpoint, body);
+    free(body);
+    return resp ? resp : strdup("{\"error\":\"connection failed\"}");
+}
+
 static char *handle_tool_call(const char *name, const char *arguments) {
     if (strcmp(name, "navigate") == 0) {
         char *url = json_get_string(arguments, "url");
@@ -390,20 +415,9 @@ static char *handle_tool_call(const char *name, const char *arguments) {
         return resp;
     }
 
-    if (strcmp(name, "extract") == 0) {
-        char *resp = http_get("/extract");
-        return resp ? resp : strdup("{\"error\":\"connection failed\"}");
-    }
-
-    if (strcmp(name, "interact") == 0) {
-        char *resp = http_get("/interact");
-        return resp ? resp : strdup("{\"error\":\"connection failed\"}");
-    }
-
-    if (strcmp(name, "console") == 0) {
-        char *resp = http_get("/console");
-        return resp ? resp : strdup("{\"error\":\"connection failed\"}");
-    }
+    if (strcmp(name, "extract") == 0) return get_passthrough("/extract");
+    if (strcmp(name, "interact") == 0) return get_passthrough("/interact");
+    if (strcmp(name, "console") == 0) return get_passthrough("/console");
 
     if (strcmp(name, "fill") == 0) {
         // Support both single-field and multi-field
@@ -558,18 +572,7 @@ static char *handle_tool_call(const char *name, const char *arguments) {
         return resp ? resp : strdup("{\"error\":\"connection failed\"}");
     }
 
-    if (strcmp(name, "scroll") == 0) {
-        char *selector = json_get_string(arguments, "selector");
-        if (!selector) return strdup("{\"error\":\"missing selector\"}");
-        char *escaped = json_escape(selector);
-        int bsize = (int)strlen(escaped) + 128;
-        char *body = malloc(bsize);
-        snprintf(body, bsize, "{\"selector\":\"%s\"}", escaped);
-        free(escaped); free(selector);
-        char *resp = http_post("/scroll", body);
-        free(body);
-        return resp ? resp : strdup("{\"error\":\"connection failed\"}");
-    }
+    if (strcmp(name, "scroll") == 0) return post_string_param("/scroll", "selector", arguments);
 
     if (strcmp(name, "storage") == 0) {
         char *type = json_get_string(arguments, "type");
@@ -606,17 +609,7 @@ static char *handle_tool_call(const char *name, const char *arguments) {
         return resp ? resp : strdup("{\"error\":\"connection failed\"}");
     }
 
-    if (strcmp(name, "execute") == 0) {
-        char *cmd = json_get_string(arguments, "command");
-        if (!cmd) return strdup("{\"error\":\"missing command\"}");
-        char *escaped = json_escape(cmd);
-        char body[4096];
-        snprintf(body, sizeof(body), "{\"command\":\"%s\"}", escaped);
-        free(escaped);
-        free(cmd);
-        char *resp = http_post("/command", body);
-        return resp ? resp : strdup("{\"error\":\"connection failed\"}");
-    }
+    if (strcmp(name, "execute") == 0) return post_string_param("/command", "command", arguments);
 
     if (strcmp(name, "action") == 0) {
         char *action = json_get_string(arguments, "action");
@@ -637,10 +630,7 @@ static char *handle_tool_call(const char *name, const char *arguments) {
         return resp ? resp : strdup("{\"error\":\"connection failed\"}");
     }
 
-    if (strcmp(name, "state") == 0) {
-        char *resp = http_get("/state");
-        return resp ? resp : strdup("{\"error\":\"connection failed\"}");
-    }
+    if (strcmp(name, "state") == 0) return get_passthrough("/state");
 
     if (strcmp(name, "click") == 0) {
         char *selector = json_get_string(arguments, "selector");
@@ -663,42 +653,11 @@ static char *handle_tool_call(const char *name, const char *arguments) {
         return resp ? resp : strdup("{\"error\":\"connection failed\"}");
     }
 
-    if (strcmp(name, "hover") == 0) {
-        char *selector = json_get_string(arguments, "selector");
-        if (!selector) return strdup("{\"error\":\"missing selector\"}");
-        char *escaped = json_escape(selector);
-        char body[4096];
-        snprintf(body, sizeof(body), "{\"selector\":\"%s\"}", escaped);
-        free(escaped);
-        free(selector);
-        char *resp = http_post("/hover", body);
-        return resp ? resp : strdup("{\"error\":\"connection failed\"}");
-    }
+    if (strcmp(name, "hover") == 0) return post_string_param("/hover", "selector", arguments);
 
-    if (strcmp(name, "key") == 0) {
-        char *key = json_get_string(arguments, "key");
-        if (!key) return strdup("{\"error\":\"missing key\"}");
-        char *escaped = json_escape(key);
-        char body[256];
-        snprintf(body, sizeof(body), "{\"key\":\"%s\"}", escaped);
-        free(escaped);
-        free(key);
-        char *resp = http_post("/key", body);
-        return resp ? resp : strdup("{\"error\":\"connection failed\"}");
-    }
+    if (strcmp(name, "key") == 0) return post_string_param("/key", "key", arguments);
 
-    if (strcmp(name, "eval") == 0) {
-        char *js = json_get_string(arguments, "js");
-        if (!js) return strdup("{\"error\":\"missing js\"}");
-        char *escaped = json_escape(js);
-        int bsize = (int)strlen(escaped) + 64;
-        char *body = malloc(bsize);
-        snprintf(body, bsize, "{\"js\":\"%s\"}", escaped);
-        free(escaped); free(js);
-        char *resp = http_post("/eval", body);
-        free(body);
-        return resp ? resp : strdup("{\"error\":\"connection failed\"}");
-    }
+    if (strcmp(name, "eval") == 0) return post_string_param("/eval", "js", arguments);
 
     if (strcmp(name, "drag") == 0) {
         char *from = json_get_string(arguments, "from");
@@ -713,10 +672,7 @@ static char *handle_tool_call(const char *name, const char *arguments) {
         return resp ? resp : strdup("{\"error\":\"connection failed\"}");
     }
 
-    if (strcmp(name, "dialog") == 0) {
-        char *resp = http_get("/dialog");
-        return resp ? resp : strdup("{\"error\":\"connection failed\"}");
-    }
+    if (strcmp(name, "dialog") == 0) return get_passthrough("/dialog");
 
     return strdup("{\"error\":\"unknown tool\"}");
 }

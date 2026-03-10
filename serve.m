@@ -121,6 +121,88 @@ static NSDictionary *parse_json_body(const char *body, int len) {
     return [NSJSONSerialization JSONObjectWithData:data options:0 error:nil];
 }
 
+static NSString *js_escape_sq(NSString *s) {
+    return [[[s stringByReplacingOccurrencesOfString:@"\\" withString:@"\\\\"]
+               stringByReplacingOccurrencesOfString:@"'" withString:@"\\'"]
+               stringByReplacingOccurrencesOfString:@"\n" withString:@"\\n"];
+}
+
+// Evaluate JS on main thread, parse JSON string result, wait with timeout.
+// Used by most do_* functions that run JS and return a parsed dict.
+static NSDictionary *eval_js_sync(ServeContext *ctx, NSString *js, NSString *label, double timeout_sec) {
+    __block NSDictionary *result = nil;
+    dispatch_sync(dispatch_get_main_queue(), ^{
+        WKWebView *wv = (__bridge WKWebView *)ui_get_active_webview(ctx->ui);
+        if (!wv) { result = @{@"ok": @NO, @"error": @"no active webview"}; return; }
+
+        __block BOOL done = NO;
+        __block NSDictionary *response = nil;
+
+        [wv evaluateJavaScript:js completionHandler:^(id res, NSError *error) {
+            if (error) {
+                response = @{@"ok": @NO, @"error": error.localizedDescription ?: @"unknown"};
+            } else if (res && [res isKindOfClass:[NSString class]]) {
+                NSData *data = [(NSString *)res dataUsingEncoding:NSUTF8StringEncoding];
+                response = [NSJSONSerialization JSONObjectWithData:data options:0 error:nil];
+            }
+            done = YES;
+        }];
+
+        NSDate *deadline = [NSDate dateWithTimeIntervalSinceNow:timeout_sec];
+        while (!done && [[NSRunLoop currentRunLoop] runMode:NSDefaultRunLoopMode
+                                                beforeDate:deadline]) {
+            if ([deadline timeIntervalSinceNow] <= 0) break;
+        }
+
+        if (!done) result = @{@"ok": @NO, @"error": [label stringByAppendingString:@" timeout"]};
+        else if (response) result = response;
+        else result = @{@"ok": @NO, @"error": [label stringByAppendingString:@" failed"]};
+    });
+    return result ?: @{@"ok": @NO, @"error": [label stringByAppendingString:@" failed"]};
+}
+
+// Like eval_js_sync but injects ok:YES into the parsed result (for extract/interact).
+static NSDictionary *eval_js_sync_inject_ok(ServeContext *ctx, NSString *js, NSString *label, double timeout_sec) {
+    __block NSDictionary *result = nil;
+    dispatch_sync(dispatch_get_main_queue(), ^{
+        WKWebView *wv = (__bridge WKWebView *)ui_get_active_webview(ctx->ui);
+        if (!wv) { result = @{@"ok": @NO, @"error": @"no active webview"}; return; }
+
+        __block BOOL done = NO;
+        __block NSDictionary *response = nil;
+
+        [wv evaluateJavaScript:js completionHandler:^(id res, NSError *error) {
+            if (error) {
+                response = @{@"ok": @NO, @"error": error.localizedDescription ?: @"unknown"};
+            } else if (res && [res isKindOfClass:[NSString class]]) {
+                NSData *data = [(NSString *)res dataUsingEncoding:NSUTF8StringEncoding];
+                NSDictionary *parsed = [NSJSONSerialization JSONObjectWithData:data options:0 error:nil];
+                if (parsed) {
+                    NSMutableDictionary *r = [parsed mutableCopy];
+                    r[@"ok"] = @YES;
+                    response = r;
+                } else {
+                    response = @{@"ok": @NO, @"error": @"parse failed"};
+                }
+            } else {
+                response = @{@"ok": @NO, @"error": @"no result"};
+            }
+            done = YES;
+        }];
+
+        NSDate *deadline = [NSDate dateWithTimeIntervalSinceNow:timeout_sec];
+        while (!done && [[NSRunLoop currentRunLoop] runMode:NSDefaultRunLoopMode
+                                                beforeDate:deadline]) {
+            if ([deadline timeIntervalSinceNow] <= 0) break;
+        }
+
+        if (!done) result = @{@"ok": @NO, @"error": [label stringByAppendingString:@" timeout"]};
+        else if (response) result = response;
+        else result = @{@"ok": @NO, @"error": [label stringByAppendingString:@" failed"]};
+    });
+    return result ?: @{@"ok": @NO, @"error": [label stringByAppendingString:@" failed"]};
+}
+
 // --- Named key translation ---
 
 typedef struct {
@@ -332,13 +414,11 @@ static NSDictionary *do_wait_for(NSDictionary *json, ServeContext *ctx) {
 
     NSString *js;
     if (selector) {
-        NSString *escapedSel = [selector stringByReplacingOccurrencesOfString:@"'"
-                                                                  withString:@"\\'"];
+        NSString *escapedSel = js_escape_sq(selector);
         js = [NSString stringWithFormat:
             @"!!document.querySelector('%@')", escapedSel];
     } else {
-        NSString *escapedUrl = [url_contains stringByReplacingOccurrencesOfString:@"'"
-                                                                      withString:@"\\'"];
+        NSString *escapedUrl = js_escape_sq(url_contains);
         js = [NSString stringWithFormat:
             @"location.href.indexOf('%@')!==-1", escapedUrl];
     }
@@ -421,87 +501,11 @@ static NSDictionary *do_eval(NSDictionary *json, ServeContext *ctx) {
 }
 
 static NSDictionary *do_extract(ServeContext *ctx) {
-    __block NSDictionary *result = nil;
-    dispatch_sync(dispatch_get_main_queue(), ^{
-        WKWebView *wv = (__bridge WKWebView *)ui_get_active_webview(ctx->ui);
-        if (!wv) { result = @{@"ok": @NO, @"error": @"no active webview"}; return; }
-
-        __block NSDictionary *response = nil;
-        __block BOOL done = NO;
-
-        NSString *js = [NSString stringWithUTF8String:kExtractJS];
-        [wv evaluateJavaScript:js completionHandler:^(id res, NSError *error) {
-            if (error) {
-                response = @{@"ok": @NO, @"error": error.localizedDescription ?: @"unknown"};
-            } else if (res && [res isKindOfClass:[NSString class]]) {
-                NSData *data = [(NSString *)res dataUsingEncoding:NSUTF8StringEncoding];
-                NSDictionary *parsed = [NSJSONSerialization JSONObjectWithData:data options:0 error:nil];
-                if (parsed) {
-                    NSMutableDictionary *r = [parsed mutableCopy];
-                    r[@"ok"] = @YES;
-                    response = r;
-                } else {
-                    response = @{@"ok": @NO, @"error": @"parse failed"};
-                }
-            } else {
-                response = @{@"ok": @NO, @"error": @"no result"};
-            }
-            done = YES;
-        }];
-
-        NSDate *timeout = [NSDate dateWithTimeIntervalSinceNow:10.0];
-        while (!done && [[NSRunLoop currentRunLoop] runMode:NSDefaultRunLoopMode
-                                                beforeDate:timeout]) {
-            if ([timeout timeIntervalSinceNow] <= 0) break;
-        }
-
-        if (!done) result = @{@"ok": @NO, @"error": @"extract timeout"};
-        else if (response) result = response;
-        else result = @{@"ok": @NO, @"error": @"extract failed"};
-    });
-    return result ?: @{@"ok": @NO, @"error": @"extract failed"};
+    return eval_js_sync_inject_ok(ctx, [NSString stringWithUTF8String:kExtractJS], @"extract", 10.0);
 }
 
 static NSDictionary *do_interact(ServeContext *ctx) {
-    __block NSDictionary *result = nil;
-    dispatch_sync(dispatch_get_main_queue(), ^{
-        WKWebView *wv = (__bridge WKWebView *)ui_get_active_webview(ctx->ui);
-        if (!wv) { result = @{@"ok": @NO, @"error": @"no active webview"}; return; }
-
-        __block NSDictionary *response = nil;
-        __block BOOL done = NO;
-
-        NSString *js = [NSString stringWithUTF8String:kInteractJS];
-        [wv evaluateJavaScript:js completionHandler:^(id res, NSError *error) {
-            if (error) {
-                response = @{@"ok": @NO, @"error": error.localizedDescription ?: @"unknown"};
-            } else if (res && [res isKindOfClass:[NSString class]]) {
-                NSData *data = [(NSString *)res dataUsingEncoding:NSUTF8StringEncoding];
-                NSDictionary *parsed = [NSJSONSerialization JSONObjectWithData:data options:0 error:nil];
-                if (parsed) {
-                    NSMutableDictionary *r = [parsed mutableCopy];
-                    r[@"ok"] = @YES;
-                    response = r;
-                } else {
-                    response = @{@"ok": @NO, @"error": @"parse failed"};
-                }
-            } else {
-                response = @{@"ok": @NO, @"error": @"no result"};
-            }
-            done = YES;
-        }];
-
-        NSDate *timeout = [NSDate dateWithTimeIntervalSinceNow:10.0];
-        while (!done && [[NSRunLoop currentRunLoop] runMode:NSDefaultRunLoopMode
-                                                beforeDate:timeout]) {
-            if ([timeout timeIntervalSinceNow] <= 0) break;
-        }
-
-        if (!done) result = @{@"ok": @NO, @"error": @"interact timeout"};
-        else if (response) result = response;
-        else result = @{@"ok": @NO, @"error": @"interact failed"};
-    });
-    return result ?: @{@"ok": @NO, @"error": @"interact failed"};
+    return eval_js_sync_inject_ok(ctx, [NSString stringWithUTF8String:kInteractJS], @"interact", 10.0);
 }
 
 static NSDictionary *do_fill(NSDictionary *json, ServeContext *ctx) {
@@ -521,17 +525,9 @@ static NSDictionary *do_fill(NSDictionary *json, ServeContext *ctx) {
         NSString *sel = field[@"selector"];
         if (!sel) continue;
 
-        NSString *escapedSel = [sel stringByReplacingOccurrencesOfString:@"\\"
-                                                             withString:@"\\\\"];
-        escapedSel = [escapedSel stringByReplacingOccurrencesOfString:@"'"
-                                                           withString:@"\\'"];
+        NSString *escapedSel = js_escape_sq(sel);
         NSString *value = [field[@"value"] description] ?: @"";
-        NSString *escapedVal = [value stringByReplacingOccurrencesOfString:@"\\"
-                                                               withString:@"\\\\"];
-        escapedVal = [escapedVal stringByReplacingOccurrencesOfString:@"'"
-                                                          withString:@"\\'"];
-        escapedVal = [escapedVal stringByReplacingOccurrencesOfString:@"\n"
-                                                          withString:@"\\n"];
+        NSString *escapedVal = js_escape_sq(value);
 
         [js appendFormat:
             @"(function(){"
@@ -568,35 +564,7 @@ static NSDictionary *do_fill(NSDictionary *json, ServeContext *ctx) {
 
     [js appendString:@"return JSON.stringify({ok:true,results:results})})()"];
 
-    __block NSDictionary *result = nil;
-    dispatch_sync(dispatch_get_main_queue(), ^{
-        WKWebView *wv = (__bridge WKWebView *)ui_get_active_webview(ctx->ui);
-        if (!wv) { result = @{@"ok": @NO, @"error": @"no active webview"}; return; }
-
-        __block NSDictionary *response = nil;
-        __block BOOL done = NO;
-
-        [wv evaluateJavaScript:js completionHandler:^(id res, NSError *error) {
-            if (error) {
-                response = @{@"ok": @NO, @"error": error.localizedDescription ?: @"unknown"};
-            } else if (res && [res isKindOfClass:[NSString class]]) {
-                NSData *data = [(NSString *)res dataUsingEncoding:NSUTF8StringEncoding];
-                response = [NSJSONSerialization JSONObjectWithData:data options:0 error:nil];
-            }
-            done = YES;
-        }];
-
-        NSDate *timeout = [NSDate dateWithTimeIntervalSinceNow:5.0];
-        while (!done && [[NSRunLoop currentRunLoop] runMode:NSDefaultRunLoopMode
-                                                beforeDate:timeout]) {
-            if ([timeout timeIntervalSinceNow] <= 0) break;
-        }
-
-        if (!done) result = @{@"ok": @NO, @"error": @"fill timeout"};
-        else if (response) result = response;
-        else result = @{@"ok": @NO, @"error": @"fill failed"};
-    });
-    return result ?: @{@"ok": @NO, @"error": @"fill failed"};
+    return eval_js_sync(ctx, js, @"fill", 5.0);
 }
 
 static NSDictionary *do_click(NSDictionary *json, ServeContext *ctx) {
@@ -604,58 +572,28 @@ static NSDictionary *do_click(NSDictionary *json, ServeContext *ctx) {
     NSString *text = json[@"text"];
     if (!selector && !text) return @{@"ok": @NO, @"error": @"missing selector or text"};
 
-    __block NSDictionary *result = nil;
-    dispatch_sync(dispatch_get_main_queue(), ^{
-        WKWebView *wv = (__bridge WKWebView *)ui_get_active_webview(ctx->ui);
-        if (!wv) { result = @{@"ok": @NO, @"error": @"no active webview"}; return; }
+    NSString *js;
+    if (selector) {
+        NSString *escaped = js_escape_sq(selector);
+        js = [NSString stringWithFormat:
+            @"(function(){"
+            "var el=document.querySelector('%@');"
+            "if(!el)return JSON.stringify({ok:false,error:'element not found'});"
+            "el.click();return JSON.stringify({ok:true})"
+            "})()", escaped];
+    } else {
+        NSString *escaped = js_escape_sq(text);
+        js = [NSString stringWithFormat:
+            @"(function(){"
+            "var els=document.querySelectorAll('a,button,input,[role=button],[onclick]');"
+            "for(var i=0;i<els.length;i++){"
+            "  if(els[i].textContent.trim().indexOf('%@')!==-1){"
+            "    els[i].click();return JSON.stringify({ok:true})}}"
+            "return JSON.stringify({ok:false,error:'no element with matching text'})"
+            "})()", escaped];
+    }
 
-        NSString *js;
-        if (selector) {
-            NSString *escaped = [selector stringByReplacingOccurrencesOfString:@"'"
-                                                                   withString:@"\\'"];
-            js = [NSString stringWithFormat:
-                @"(function(){"
-                "var el=document.querySelector('%@');"
-                "if(!el)return JSON.stringify({ok:false,error:'element not found'});"
-                "el.click();return JSON.stringify({ok:true})"
-                "})()", escaped];
-        } else {
-            NSString *escaped = [text stringByReplacingOccurrencesOfString:@"'"
-                                                               withString:@"\\'"];
-            js = [NSString stringWithFormat:
-                @"(function(){"
-                "var els=document.querySelectorAll('a,button,input,[role=button],[onclick]');"
-                "for(var i=0;i<els.length;i++){"
-                "  if(els[i].textContent.trim().indexOf('%@')!==-1){"
-                "    els[i].click();return JSON.stringify({ok:true})}}"
-                "return JSON.stringify({ok:false,error:'no element with matching text'})"
-                "})()", escaped];
-        }
-
-        __block BOOL done = NO;
-        __block NSDictionary *response = nil;
-
-        [wv evaluateJavaScript:js completionHandler:^(id res, NSError *error) {
-            if (error) {
-                response = @{@"ok": @NO, @"error": error.localizedDescription ?: @"unknown"};
-            } else if (res && [res isKindOfClass:[NSString class]]) {
-                NSData *data = [(NSString *)res dataUsingEncoding:NSUTF8StringEncoding];
-                response = [NSJSONSerialization JSONObjectWithData:data options:0 error:nil];
-            }
-            done = YES;
-        }];
-
-        NSDate *timeout = [NSDate dateWithTimeIntervalSinceNow:5.0];
-        while (!done && [[NSRunLoop currentRunLoop] runMode:NSDefaultRunLoopMode
-                                                beforeDate:timeout]) {
-            if ([timeout timeIntervalSinceNow] <= 0) break;
-        }
-
-        if (!done) result = @{@"ok": @NO, @"error": @"click timeout"};
-        else if (response) result = response;
-        else result = @{@"ok": @NO, @"error": @"click failed"};
-    });
-    return result ?: @{@"ok": @NO, @"error": @"click failed"};
+    return eval_js_sync(ctx, js, @"click", 5.0);
 }
 
 // --- Feature: /query — read element text, attributes, visibility ---
@@ -668,10 +606,7 @@ static NSDictionary *do_query(NSDictionary *json, ServeContext *ctx) {
     NSNumber *allFlag = json[@"all"];
     BOOL queryAll = allFlag && [allFlag boolValue];
 
-    NSString *escapedSel = [selector stringByReplacingOccurrencesOfString:@"\\"
-                                                              withString:@"\\\\"];
-    escapedSel = [escapedSel stringByReplacingOccurrencesOfString:@"'"
-                                                       withString:@"\\'"];
+    NSString *escapedSel = js_escape_sq(selector);
 
     NSMutableString *js = [NSMutableString string];
     [js appendString:@"(function(){"];
@@ -693,8 +628,7 @@ static NSDictionary *do_query(NSDictionary *json, ServeContext *ctx) {
     // Shared element info extraction
     NSString *extractInfo;
     if (attribute) {
-        NSString *escapedAttr = [attribute stringByReplacingOccurrencesOfString:@"'"
-                                                                    withString:@"\\'"];
+        NSString *escapedAttr = js_escape_sq(attribute);
         extractInfo = [NSString stringWithFormat:
             @"var val=el.getAttribute('%@');"
             "var info={tag:el.tagName.toLowerCase(),value:val};", escapedAttr];
@@ -729,35 +663,7 @@ static NSDictionary *do_query(NSDictionary *json, ServeContext *ctx) {
 
     [js appendString:@"})()"];
 
-    __block NSDictionary *result = nil;
-    dispatch_sync(dispatch_get_main_queue(), ^{
-        WKWebView *wv = (__bridge WKWebView *)ui_get_active_webview(ctx->ui);
-        if (!wv) { result = @{@"ok": @NO, @"error": @"no active webview"}; return; }
-
-        __block BOOL done = NO;
-        __block NSDictionary *response = nil;
-
-        [wv evaluateJavaScript:js completionHandler:^(id res, NSError *error) {
-            if (error) {
-                response = @{@"ok": @NO, @"error": error.localizedDescription ?: @"unknown"};
-            } else if (res && [res isKindOfClass:[NSString class]]) {
-                NSData *data = [(NSString *)res dataUsingEncoding:NSUTF8StringEncoding];
-                response = [NSJSONSerialization JSONObjectWithData:data options:0 error:nil];
-            }
-            done = YES;
-        }];
-
-        NSDate *timeout = [NSDate dateWithTimeIntervalSinceNow:5.0];
-        while (!done && [[NSRunLoop currentRunLoop] runMode:NSDefaultRunLoopMode
-                                                beforeDate:timeout]) {
-            if ([timeout timeIntervalSinceNow] <= 0) break;
-        }
-
-        if (!done) result = @{@"ok": @NO, @"error": @"query timeout"};
-        else if (response) result = response;
-        else result = @{@"ok": @NO, @"error": @"query failed"};
-    });
-    return result ?: @{@"ok": @NO, @"error": @"query failed"};
+    return eval_js_sync(ctx, js, @"query", 5.0);
 }
 
 // --- Feature: /wait_for with url_contains for navigation wait ---
@@ -808,10 +714,7 @@ static NSDictionary *do_select(NSDictionary *json, ServeContext *ctx) {
     NSString *value = json[@"value"];
     if (!text && !value) return @{@"ok": @NO, @"error": @"missing text or value"};
 
-    NSString *escapedSel = [selector stringByReplacingOccurrencesOfString:@"\\"
-                                                              withString:@"\\\\"];
-    escapedSel = [escapedSel stringByReplacingOccurrencesOfString:@"'"
-                                                       withString:@"\\'"];
+    NSString *escapedSel = js_escape_sq(selector);
 
     NSMutableString *js = [NSMutableString stringWithString:
         @"(function(){"
@@ -822,10 +725,7 @@ static NSDictionary *do_select(NSDictionary *json, ServeContext *ctx) {
         "return JSON.stringify({ok:false,error:'not a select element'});"];
 
     if (text) {
-        NSString *escapedText = [text stringByReplacingOccurrencesOfString:@"\\"
-                                                               withString:@"\\\\"];
-        escapedText = [escapedText stringByReplacingOccurrencesOfString:@"'"
-                                                            withString:@"\\'"];
+        NSString *escapedText = js_escape_sq(text);
         [js appendFormat:
             @"for(var i=0;i<el.options.length;i++){"
             "  if(el.options[i].textContent.trim()==='%@'){"
@@ -836,10 +736,7 @@ static NSDictionary *do_select(NSDictionary *json, ServeContext *ctx) {
             "return JSON.stringify({ok:false,error:'option not found'})",
             escapedText];
     } else {
-        NSString *escapedVal = [value stringByReplacingOccurrencesOfString:@"\\"
-                                                               withString:@"\\\\"];
-        escapedVal = [escapedVal stringByReplacingOccurrencesOfString:@"'"
-                                                          withString:@"\\'"];
+        NSString *escapedVal = js_escape_sq(value);
         [js appendFormat:
             @"el.value='%@';"
             "el.dispatchEvent(new Event('change',{bubbles:true}));"
@@ -851,35 +748,7 @@ static NSDictionary *do_select(NSDictionary *json, ServeContext *ctx) {
 
     [js appendString:@"})()"];
 
-    __block NSDictionary *result = nil;
-    dispatch_sync(dispatch_get_main_queue(), ^{
-        WKWebView *wv = (__bridge WKWebView *)ui_get_active_webview(ctx->ui);
-        if (!wv) { result = @{@"ok": @NO, @"error": @"no active webview"}; return; }
-
-        __block BOOL done = NO;
-        __block NSDictionary *response = nil;
-
-        [wv evaluateJavaScript:js completionHandler:^(id res, NSError *error) {
-            if (error) {
-                response = @{@"ok": @NO, @"error": error.localizedDescription ?: @"unknown"};
-            } else if (res && [res isKindOfClass:[NSString class]]) {
-                NSData *data = [(NSString *)res dataUsingEncoding:NSUTF8StringEncoding];
-                response = [NSJSONSerialization JSONObjectWithData:data options:0 error:nil];
-            }
-            done = YES;
-        }];
-
-        NSDate *timeout = [NSDate dateWithTimeIntervalSinceNow:5.0];
-        while (!done && [[NSRunLoop currentRunLoop] runMode:NSDefaultRunLoopMode
-                                                beforeDate:timeout]) {
-            if ([timeout timeIntervalSinceNow] <= 0) break;
-        }
-
-        if (!done) result = @{@"ok": @NO, @"error": @"select timeout"};
-        else if (response) result = response;
-        else result = @{@"ok": @NO, @"error": @"select failed"};
-    });
-    return result ?: @{@"ok": @NO, @"error": @"select failed"};
+    return eval_js_sync(ctx, js, @"select", 5.0);
 }
 
 // --- Feature: /scroll — scroll element into view ---
@@ -888,10 +757,7 @@ static NSDictionary *do_scroll(NSDictionary *json, ServeContext *ctx) {
     NSString *selector = json[@"selector"];
     if (!selector) return @{@"ok": @NO, @"error": @"missing selector"};
 
-    NSString *escapedSel = [selector stringByReplacingOccurrencesOfString:@"\\"
-                                                              withString:@"\\\\"];
-    escapedSel = [escapedSel stringByReplacingOccurrencesOfString:@"'"
-                                                       withString:@"\\'"];
+    NSString *escapedSel = js_escape_sq(selector);
 
     NSString *behavior = json[@"behavior"] ?: @"smooth";
     NSString *block = json[@"block"] ?: @"center";
@@ -907,35 +773,7 @@ static NSDictionary *do_scroll(NSDictionary *json, ServeContext *ctx) {
         "        width:Math.round(r.width),height:Math.round(r.height)}})"
         "})()", escapedSel, behavior, block];
 
-    __block NSDictionary *result = nil;
-    dispatch_sync(dispatch_get_main_queue(), ^{
-        WKWebView *wv = (__bridge WKWebView *)ui_get_active_webview(ctx->ui);
-        if (!wv) { result = @{@"ok": @NO, @"error": @"no active webview"}; return; }
-
-        __block BOOL done = NO;
-        __block NSDictionary *response = nil;
-
-        [wv evaluateJavaScript:js completionHandler:^(id res, NSError *error) {
-            if (error) {
-                response = @{@"ok": @NO, @"error": error.localizedDescription ?: @"unknown"};
-            } else if (res && [res isKindOfClass:[NSString class]]) {
-                NSData *data = [(NSString *)res dataUsingEncoding:NSUTF8StringEncoding];
-                response = [NSJSONSerialization JSONObjectWithData:data options:0 error:nil];
-            }
-            done = YES;
-        }];
-
-        NSDate *timeout = [NSDate dateWithTimeIntervalSinceNow:5.0];
-        while (!done && [[NSRunLoop currentRunLoop] runMode:NSDefaultRunLoopMode
-                                                beforeDate:timeout]) {
-            if ([timeout timeIntervalSinceNow] <= 0) break;
-        }
-
-        if (!done) result = @{@"ok": @NO, @"error": @"scroll timeout"};
-        else if (response) result = response;
-        else result = @{@"ok": @NO, @"error": @"scroll failed"};
-    });
-    return result ?: @{@"ok": @NO, @"error": @"scroll failed"};
+    return eval_js_sync(ctx, js, @"scroll", 5.0);
 }
 
 // --- Feature: /storage — read/write cookies, localStorage, sessionStorage ---
@@ -953,8 +791,7 @@ static NSDictionary *do_storage(NSDictionary *json, ServeContext *ctx) {
     if ([type isEqualToString:@"cookie"]) {
         if ([action isEqualToString:@"get"]) {
             if (key) {
-                NSString *escapedKey = [key stringByReplacingOccurrencesOfString:@"'"
-                                                                     withString:@"\\'"];
+                NSString *escapedKey = js_escape_sq(key);
                 [js appendFormat:
                     @"var pairs=document.cookie.split('; ');"
                     "for(var i=0;i<pairs.length;i++){"
@@ -976,13 +813,10 @@ static NSDictionary *do_storage(NSDictionary *json, ServeContext *ctx) {
             }
         } else if ([action isEqualToString:@"set"]) {
             if (!key) { return @{@"ok": @NO, @"error": @"missing key"}; }
-            NSString *escapedKey = [key stringByReplacingOccurrencesOfString:@"'"
-                                                                 withString:@"\\'"];
-            NSString *escapedVal = [(value ?: @"") stringByReplacingOccurrencesOfString:@"'"
-                                                                            withString:@"\\'"];
+            NSString *escapedKey = js_escape_sq(key);
+            NSString *escapedVal = js_escape_sq(value ?: @"");
             NSString *extra = json[@"options"] ?: @"";
-            NSString *escapedExtra = [extra stringByReplacingOccurrencesOfString:@"'"
-                                                                     withString:@"\\'"];
+            NSString *escapedExtra = js_escape_sq(extra);
             [js appendFormat:
                 @"document.cookie=encodeURIComponent('%@')+'='+encodeURIComponent('%@')+'%@';"
                 "return JSON.stringify({ok:true})",
@@ -990,8 +824,7 @@ static NSDictionary *do_storage(NSDictionary *json, ServeContext *ctx) {
                 escapedExtra.length > 0 ? [NSString stringWithFormat:@";%@", escapedExtra] : @""];
         } else if ([action isEqualToString:@"delete"]) {
             if (!key) { return @{@"ok": @NO, @"error": @"missing key"}; }
-            NSString *escapedKey = [key stringByReplacingOccurrencesOfString:@"'"
-                                                                 withString:@"\\'"];
+            NSString *escapedKey = js_escape_sq(key);
             [js appendFormat:
                 @"document.cookie=encodeURIComponent('%@')+'=;expires=Thu, 01 Jan 1970 00:00:00 GMT;path=/';"
                 "return JSON.stringify({ok:true})", escapedKey];
@@ -1000,8 +833,7 @@ static NSDictionary *do_storage(NSDictionary *json, ServeContext *ctx) {
         NSString *store = [type isEqualToString:@"localStorage"] ? @"localStorage" : @"sessionStorage";
         if ([action isEqualToString:@"get"]) {
             if (key) {
-                NSString *escapedKey = [key stringByReplacingOccurrencesOfString:@"'"
-                                                                     withString:@"\\'"];
+                NSString *escapedKey = js_escape_sq(key);
                 [js appendFormat:
                     @"var v=%@.getItem('%@');"
                     "return JSON.stringify({ok:true,value:v})", store, escapedKey];
@@ -1014,17 +846,14 @@ static NSDictionary *do_storage(NSDictionary *json, ServeContext *ctx) {
             }
         } else if ([action isEqualToString:@"set"]) {
             if (!key) { return @{@"ok": @NO, @"error": @"missing key"}; }
-            NSString *escapedKey = [key stringByReplacingOccurrencesOfString:@"'"
-                                                                 withString:@"\\'"];
-            NSString *escapedVal = [(value ?: @"") stringByReplacingOccurrencesOfString:@"'"
-                                                                            withString:@"\\'"];
+            NSString *escapedKey = js_escape_sq(key);
+            NSString *escapedVal = js_escape_sq(value ?: @"");
             [js appendFormat:
                 @"%@.setItem('%@','%@');"
                 "return JSON.stringify({ok:true})", store, escapedKey, escapedVal];
         } else if ([action isEqualToString:@"delete"]) {
             if (!key) { return @{@"ok": @NO, @"error": @"missing key"}; }
-            NSString *escapedKey = [key stringByReplacingOccurrencesOfString:@"'"
-                                                                 withString:@"\\'"];
+            NSString *escapedKey = js_escape_sq(key);
             [js appendFormat:
                 @"%@.removeItem('%@');"
                 "return JSON.stringify({ok:true})", store, escapedKey];
@@ -1039,81 +868,24 @@ static NSDictionary *do_storage(NSDictionary *json, ServeContext *ctx) {
 
     [js appendString:@"}catch(e){return JSON.stringify({ok:false,error:e.message})}})()"];
 
-    __block NSDictionary *result = nil;
-    dispatch_sync(dispatch_get_main_queue(), ^{
-        WKWebView *wv = (__bridge WKWebView *)ui_get_active_webview(ctx->ui);
-        if (!wv) { result = @{@"ok": @NO, @"error": @"no active webview"}; return; }
-
-        __block BOOL done = NO;
-        __block NSDictionary *response = nil;
-
-        [wv evaluateJavaScript:js completionHandler:^(id res, NSError *error) {
-            if (error) {
-                response = @{@"ok": @NO, @"error": error.localizedDescription ?: @"unknown"};
-            } else if (res && [res isKindOfClass:[NSString class]]) {
-                NSData *data = [(NSString *)res dataUsingEncoding:NSUTF8StringEncoding];
-                response = [NSJSONSerialization JSONObjectWithData:data options:0 error:nil];
-            }
-            done = YES;
-        }];
-
-        NSDate *timeout = [NSDate dateWithTimeIntervalSinceNow:5.0];
-        while (!done && [[NSRunLoop currentRunLoop] runMode:NSDefaultRunLoopMode
-                                                beforeDate:timeout]) {
-            if ([timeout timeIntervalSinceNow] <= 0) break;
-        }
-
-        if (!done) result = @{@"ok": @NO, @"error": @"storage timeout"};
-        else if (response) result = response;
-        else result = @{@"ok": @NO, @"error": @"storage failed"};
-    });
-    return result ?: @{@"ok": @NO, @"error": @"storage failed"};
+    return eval_js_sync(ctx, js, @"storage", 5.0);
 }
 
 static NSDictionary *do_hover(NSDictionary *json, ServeContext *ctx) {
     NSString *selector = json[@"selector"];
     if (!selector) return @{@"ok": @NO, @"error": @"missing selector"};
 
-    __block NSDictionary *result = nil;
-    dispatch_sync(dispatch_get_main_queue(), ^{
-        WKWebView *wv = (__bridge WKWebView *)ui_get_active_webview(ctx->ui);
-        if (!wv) { result = @{@"ok": @NO, @"error": @"no active webview"}; return; }
+    NSString *escaped = js_escape_sq(selector);
+    NSString *js = [NSString stringWithFormat:
+        @"(function(){"
+        "var el=document.querySelector('%@');"
+        "if(!el)return JSON.stringify({ok:false,error:'element not found'});"
+        "el.dispatchEvent(new MouseEvent('mouseenter',{bubbles:true}));"
+        "el.dispatchEvent(new MouseEvent('mouseover',{bubbles:true}));"
+        "return JSON.stringify({ok:true})"
+        "})()", escaped];
 
-        NSString *escaped = [selector stringByReplacingOccurrencesOfString:@"'"
-                                                               withString:@"\\'"];
-        NSString *js = [NSString stringWithFormat:
-            @"(function(){"
-            "var el=document.querySelector('%@');"
-            "if(!el)return JSON.stringify({ok:false,error:'element not found'});"
-            "el.dispatchEvent(new MouseEvent('mouseenter',{bubbles:true}));"
-            "el.dispatchEvent(new MouseEvent('mouseover',{bubbles:true}));"
-            "return JSON.stringify({ok:true})"
-            "})()", escaped];
-
-        __block BOOL done = NO;
-        __block NSDictionary *response = nil;
-
-        [wv evaluateJavaScript:js completionHandler:^(id res, NSError *error) {
-            if (error) {
-                response = @{@"ok": @NO, @"error": error.localizedDescription ?: @"unknown"};
-            } else if (res && [res isKindOfClass:[NSString class]]) {
-                NSData *data = [(NSString *)res dataUsingEncoding:NSUTF8StringEncoding];
-                response = [NSJSONSerialization JSONObjectWithData:data options:0 error:nil];
-            }
-            done = YES;
-        }];
-
-        NSDate *timeout = [NSDate dateWithTimeIntervalSinceNow:5.0];
-        while (!done && [[NSRunLoop currentRunLoop] runMode:NSDefaultRunLoopMode
-                                                beforeDate:timeout]) {
-            if ([timeout timeIntervalSinceNow] <= 0) break;
-        }
-
-        if (!done) result = @{@"ok": @NO, @"error": @"hover timeout"};
-        else if (response) result = response;
-        else result = @{@"ok": @NO, @"error": @"hover failed"};
-    });
-    return result ?: @{@"ok": @NO, @"error": @"hover failed"};
+    return eval_js_sync(ctx, js, @"hover", 5.0);
 }
 
 static NSDictionary *do_dialog(ServeContext *ctx) {
@@ -1132,125 +904,60 @@ static NSDictionary *do_drag(NSDictionary *json, ServeContext *ctx) {
     NSString *to = json[@"to"];
     if (!from || !to) return @{@"ok": @NO, @"error": @"missing from or to selector"};
 
-    __block NSDictionary *result = nil;
-    dispatch_sync(dispatch_get_main_queue(), ^{
-        WKWebView *wv = (__bridge WKWebView *)ui_get_active_webview(ctx->ui);
-        if (!wv) { result = @{@"ok": @NO, @"error": @"no active webview"}; return; }
+    NSString *escapedFrom = js_escape_sq(from);
+    NSString *escapedTo = js_escape_sq(to);
 
-        NSString *escapedFrom = [from stringByReplacingOccurrencesOfString:@"'"
-                                                               withString:@"\\'"];
-        NSString *escapedTo = [to stringByReplacingOccurrencesOfString:@"'"
-                                                           withString:@"\\'"];
+    NSString *js = [NSString stringWithFormat:
+        @"(function(){"
+        "var src=document.querySelector('%@');"
+        "if(!src)return JSON.stringify({ok:false,error:'source not found'});"
+        "var dst=document.querySelector('%@');"
+        "if(!dst)return JSON.stringify({ok:false,error:'target not found'});"
+        "var sr=src.getBoundingClientRect(),dr=dst.getBoundingClientRect();"
+        "var sx=sr.left+sr.width/2,sy=sr.top+sr.height/2;"
+        "var dx=dr.left+dr.width/2,dy=dr.top+dr.height/2;"
+        "var opts={bubbles:true,cancelable:true};"
+        // Mouse events
+        "src.dispatchEvent(new MouseEvent('mousedown',Object.assign({},opts,{clientX:sx,clientY:sy})));"
+        "src.dispatchEvent(new MouseEvent('mousemove',Object.assign({},opts,{clientX:sx,clientY:sy})));"
+        "dst.dispatchEvent(new MouseEvent('mousemove',Object.assign({},opts,{clientX:dx,clientY:dy})));"
+        "dst.dispatchEvent(new MouseEvent('mouseup',Object.assign({},opts,{clientX:dx,clientY:dy})));"
+        // HTML5 drag events
+        "var dt=new DataTransfer();"
+        "src.dispatchEvent(new DragEvent('dragstart',{bubbles:true,cancelable:true,dataTransfer:dt}));"
+        "src.dispatchEvent(new DragEvent('drag',{bubbles:true,cancelable:true,dataTransfer:dt}));"
+        "dst.dispatchEvent(new DragEvent('dragenter',{bubbles:true,cancelable:true,dataTransfer:dt}));"
+        "dst.dispatchEvent(new DragEvent('dragover',{bubbles:true,cancelable:true,dataTransfer:dt}));"
+        "dst.dispatchEvent(new DragEvent('drop',{bubbles:true,cancelable:true,dataTransfer:dt}));"
+        "src.dispatchEvent(new DragEvent('dragend',{bubbles:true,cancelable:true,dataTransfer:dt}));"
+        "return JSON.stringify({ok:true,from:{x:sx,y:sy},to:{x:dx,y:dy}})"
+        "})()", escapedFrom, escapedTo];
 
-        NSString *js = [NSString stringWithFormat:
-            @"(function(){"
-            "var src=document.querySelector('%@');"
-            "if(!src)return JSON.stringify({ok:false,error:'source not found'});"
-            "var dst=document.querySelector('%@');"
-            "if(!dst)return JSON.stringify({ok:false,error:'target not found'});"
-            "var sr=src.getBoundingClientRect(),dr=dst.getBoundingClientRect();"
-            "var sx=sr.left+sr.width/2,sy=sr.top+sr.height/2;"
-            "var dx=dr.left+dr.width/2,dy=dr.top+dr.height/2;"
-            "var opts={bubbles:true,cancelable:true};"
-            // Mouse events
-            "src.dispatchEvent(new MouseEvent('mousedown',Object.assign({},opts,{clientX:sx,clientY:sy})));"
-            "src.dispatchEvent(new MouseEvent('mousemove',Object.assign({},opts,{clientX:sx,clientY:sy})));"
-            "dst.dispatchEvent(new MouseEvent('mousemove',Object.assign({},opts,{clientX:dx,clientY:dy})));"
-            "dst.dispatchEvent(new MouseEvent('mouseup',Object.assign({},opts,{clientX:dx,clientY:dy})));"
-            // HTML5 drag events
-            "var dt=new DataTransfer();"
-            "src.dispatchEvent(new DragEvent('dragstart',{bubbles:true,cancelable:true,dataTransfer:dt}));"
-            "src.dispatchEvent(new DragEvent('drag',{bubbles:true,cancelable:true,dataTransfer:dt}));"
-            "dst.dispatchEvent(new DragEvent('dragenter',{bubbles:true,cancelable:true,dataTransfer:dt}));"
-            "dst.dispatchEvent(new DragEvent('dragover',{bubbles:true,cancelable:true,dataTransfer:dt}));"
-            "dst.dispatchEvent(new DragEvent('drop',{bubbles:true,cancelable:true,dataTransfer:dt}));"
-            "src.dispatchEvent(new DragEvent('dragend',{bubbles:true,cancelable:true,dataTransfer:dt}));"
-            "return JSON.stringify({ok:true,from:{x:sx,y:sy},to:{x:dx,y:dy}})"
-            "})()", escapedFrom, escapedTo];
-
-        __block BOOL done = NO;
-        __block NSDictionary *response = nil;
-
-        [wv evaluateJavaScript:js completionHandler:^(id res, NSError *error) {
-            if (error) {
-                response = @{@"ok": @NO, @"error": error.localizedDescription ?: @"unknown"};
-            } else if (res && [res isKindOfClass:[NSString class]]) {
-                NSData *data = [(NSString *)res dataUsingEncoding:NSUTF8StringEncoding];
-                response = [NSJSONSerialization JSONObjectWithData:data options:0 error:nil];
-            }
-            done = YES;
-        }];
-
-        NSDate *timeout = [NSDate dateWithTimeIntervalSinceNow:5.0];
-        while (!done && [[NSRunLoop currentRunLoop] runMode:NSDefaultRunLoopMode
-                                                beforeDate:timeout]) {
-            if ([timeout timeIntervalSinceNow] <= 0) break;
-        }
-
-        if (!done) result = @{@"ok": @NO, @"error": @"drag timeout"};
-        else if (response) result = response;
-        else result = @{@"ok": @NO, @"error": @"drag failed"};
-    });
-    return result ?: @{@"ok": @NO, @"error": @"drag failed"};
+    return eval_js_sync(ctx, js, @"drag", 5.0);
 }
 
 static NSDictionary *do_console(ServeContext *ctx) {
-    __block NSDictionary *result = nil;
-    dispatch_sync(dispatch_get_main_queue(), ^{
-        WKWebView *wv = (__bridge WKWebView *)ui_get_active_webview(ctx->ui);
-        if (!wv) { result = @{@"ok": @NO, @"error": @"no active webview"}; return; }
+    NSString *js = @"(function(){"
+        "if(!window.__swim_console){"
+        "  window.__swim_console=[];"
+        "  var orig={log:console.log,warn:console.warn,error:console.error,info:console.info};"
+        "  ['log','warn','error','info'].forEach(function(level){"
+        "    console[level]=function(){"
+        "      var args=[].slice.call(arguments).map(function(a){"
+        "        try{return typeof a==='object'?JSON.stringify(a):String(a)}"
+        "        catch(e){return String(a)}"
+        "      });"
+        "      window.__swim_console.push({level:level,text:args.join(' '),ts:Date.now()});"
+        "      if(window.__swim_console.length>200)window.__swim_console.shift();"
+        "      orig[level].apply(console,arguments)"
+        "    }"
+        "  })"
+        "}"
+        "var msgs=window.__swim_console.splice(0);"
+        "return JSON.stringify({ok:true,messages:msgs,count:msgs.length})"
+        "})()";
 
-        __block NSDictionary *response = nil;
-        __block BOOL done = NO;
-
-        NSString *js = @"(function(){"
-            "if(!window.__swim_console){"
-            "  window.__swim_console=[];"
-            "  var orig={log:console.log,warn:console.warn,error:console.error,info:console.info};"
-            "  ['log','warn','error','info'].forEach(function(level){"
-            "    console[level]=function(){"
-            "      var args=[].slice.call(arguments).map(function(a){"
-            "        try{return typeof a==='object'?JSON.stringify(a):String(a)}"
-            "        catch(e){return String(a)}"
-            "      });"
-            "      window.__swim_console.push({level:level,text:args.join(' '),ts:Date.now()});"
-            "      if(window.__swim_console.length>200)window.__swim_console.shift();"
-            "      orig[level].apply(console,arguments)"
-            "    }"
-            "  })"
-            "}"
-            "var msgs=window.__swim_console.splice(0);"
-            "return JSON.stringify({ok:true,messages:msgs,count:msgs.length})"
-            "})()";
-
-        [wv evaluateJavaScript:js completionHandler:^(id res, NSError *error) {
-            if (error) {
-                response = @{@"ok": @NO, @"error": error.localizedDescription ?: @"unknown"};
-            } else if (res && [res isKindOfClass:[NSString class]]) {
-                NSData *data = [(NSString *)res dataUsingEncoding:NSUTF8StringEncoding];
-                NSDictionary *parsed = [NSJSONSerialization JSONObjectWithData:data options:0 error:nil];
-                if (parsed) {
-                    response = parsed;
-                } else {
-                    response = @{@"ok": @NO, @"error": @"parse failed"};
-                }
-            } else {
-                response = @{@"ok": @NO, @"error": @"no result"};
-            }
-            done = YES;
-        }];
-
-        NSDate *timeout = [NSDate dateWithTimeIntervalSinceNow:5.0];
-        while (!done && [[NSRunLoop currentRunLoop] runMode:NSDefaultRunLoopMode
-                                                beforeDate:timeout]) {
-            if ([timeout timeIntervalSinceNow] <= 0) break;
-        }
-
-        if (!done) result = @{@"ok": @NO, @"error": @"console timeout"};
-        else if (response) result = response;
-        else result = @{@"ok": @NO, @"error": @"console failed"};
-    });
-    return result ?: @{@"ok": @NO, @"error": @"console failed"};
+    return eval_js_sync(ctx, js, @"console", 5.0);
 }
 
 static NSDictionary *do_sleep_step(NSDictionary *json) {
