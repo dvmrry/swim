@@ -170,6 +170,8 @@ struct SwimUI {
 
     UserScriptManager *userscripts;
     SwimTheme *theme;
+    bool serving;
+    NSMutableArray *dialog_queue;  // queued dialog events when serving
 };
 
 // --- Theme Colors ---
@@ -439,6 +441,18 @@ static SwimTabBarHandler *sTabBarHandler;
     runJavaScriptAlertPanelWithMessage:(NSString *)message
                      initiatedByFrame:(WKFrameInfo *)frame
                     completionHandler:(void (^)(void))completionHandler {
+    if (self.ui->serving) {
+        if (!self.ui->dialog_queue) self.ui->dialog_queue = [NSMutableArray new];
+        [self.ui->dialog_queue addObject:@{
+            @"type": @"alert", @"message": message ?: @"",
+            @"origin": frame.request.URL.host ?: @"",
+            @"auto_response": @"accepted",
+            @"ts": @((long long)([[NSDate date] timeIntervalSince1970] * 1000))
+        }];
+        if (self.ui->dialog_queue.count > 50) [self.ui->dialog_queue removeObjectAtIndex:0];
+        completionHandler();
+        return;
+    }
     NSAlert *alert = [[NSAlert alloc] init];
     alert.messageText = message;
     alert.informativeText = [NSString stringWithFormat:@"From: %@", frame.request.URL.host];
@@ -451,6 +465,18 @@ static SwimTabBarHandler *sTabBarHandler;
     runJavaScriptConfirmPanelWithMessage:(NSString *)message
                        initiatedByFrame:(WKFrameInfo *)frame
                       completionHandler:(void (^)(BOOL))completionHandler {
+    if (self.ui->serving) {
+        if (!self.ui->dialog_queue) self.ui->dialog_queue = [NSMutableArray new];
+        [self.ui->dialog_queue addObject:@{
+            @"type": @"confirm", @"message": message ?: @"",
+            @"origin": frame.request.URL.host ?: @"",
+            @"auto_response": @"accepted",
+            @"ts": @((long long)([[NSDate date] timeIntervalSince1970] * 1000))
+        }];
+        if (self.ui->dialog_queue.count > 50) [self.ui->dialog_queue removeObjectAtIndex:0];
+        completionHandler(YES);
+        return;
+    }
     NSAlert *alert = [[NSAlert alloc] init];
     alert.messageText = message;
     alert.informativeText = [NSString stringWithFormat:@"From: %@", frame.request.URL.host];
@@ -465,6 +491,19 @@ static SwimTabBarHandler *sTabBarHandler;
                              defaultText:(NSString *)defaultText
                         initiatedByFrame:(WKFrameInfo *)frame
                        completionHandler:(void (^)(NSString *))completionHandler {
+    if (self.ui->serving) {
+        if (!self.ui->dialog_queue) self.ui->dialog_queue = [NSMutableArray new];
+        [self.ui->dialog_queue addObject:@{
+            @"type": @"prompt", @"message": prompt ?: @"",
+            @"default_text": defaultText ?: @"",
+            @"origin": frame.request.URL.host ?: @"",
+            @"auto_response": defaultText ?: @"",
+            @"ts": @((long long)([[NSDate date] timeIntervalSince1970] * 1000))
+        }];
+        if (self.ui->dialog_queue.count > 50) [self.ui->dialog_queue removeObjectAtIndex:0];
+        completionHandler(defaultText ?: @"");
+        return;
+    }
     NSAlert *alert = [[NSAlert alloc] init];
     alert.messageText = prompt;
     alert.informativeText = [NSString stringWithFormat:@"From: %@", frame.request.URL.host];
@@ -1641,4 +1680,16 @@ bool ui_is_loading(SwimUI *ui) {
 void *ui_get_active_webview(SwimUI *ui) {
     if (ui->active_tab < 0 || ui->active_tab >= ui->tab_count) return NULL;
     return (__bridge void *)ui->tabs[ui->active_tab].webview;
+}
+
+void ui_set_serving(SwimUI *ui, bool serving) {
+    ui->serving = serving;
+    if (serving && !ui->dialog_queue) {
+        ui->dialog_queue = [NSMutableArray new];
+    }
+}
+
+void *ui_get_dialog_queue(SwimUI *ui) {
+    if (!ui->dialog_queue) ui->dialog_queue = [NSMutableArray new];
+    return (__bridge void *)ui->dialog_queue;
 }

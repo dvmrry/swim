@@ -276,15 +276,15 @@ static const char *kToolsList =
     "\"description\":\"Control the swim browser. Methods: navigate (url), screenshot, pdf, extract, "
     "navigate_back, navigate_forward, eval (js), "
     "interact, fill (selector+value or fields[]), wait_for (selector|url_contains, timeout?), "
-    "console, query (selector, attribute?, all?), tab (index), select (selector, text|value), "
-    "scroll (selector), storage (type, action?, key?, value?), "
+    "console, dialog, query (selector, attribute?, all?), tab (index), select (selector, text|value), "
+    "scroll (selector), storage (type, action?, key?, value?), drag (from, to), "
     "execute (command), action (action, count?), state, click (selector|text), hover (selector), key (key)\","
     "\"inputSchema\":{\"type\":\"object\","
     "\"properties\":{"
     "\"method\":{\"type\":\"string\",\"enum\":[\"navigate\",\"navigate_back\",\"navigate_forward\","
     "\"screenshot\",\"pdf\",\"extract\","
-    "\"interact\",\"fill\",\"wait_for\",\"console\",\"query\",\"tab\",\"select\","
-    "\"scroll\",\"storage\","
+    "\"interact\",\"fill\",\"wait_for\",\"console\",\"dialog\",\"query\",\"tab\",\"select\","
+    "\"scroll\",\"storage\",\"drag\","
     "\"execute\",\"action\",\"state\",\"click\",\"hover\",\"key\",\"eval\"],"
     "\"description\":\"The operation to perform\"},"
     "\"url\":{\"type\":\"string\",\"description\":\"URL to navigate to (navigate)\"},"
@@ -304,6 +304,8 @@ static const char *kToolsList =
     "\"attribute\":{\"type\":\"string\",\"description\":\"Attribute name to read (query)\"},"
     "\"all\":{\"type\":\"boolean\",\"description\":\"Query all matching elements (query)\"},"
     "\"index\":{\"type\":\"integer\",\"description\":\"Tab index to switch to (tab)\"},"
+    "\"from\":{\"type\":\"string\",\"description\":\"Source CSS selector (drag)\"},"
+    "\"to\":{\"type\":\"string\",\"description\":\"Target CSS selector (drag)\"},"
     "\"type\":{\"type\":\"string\",\"description\":\"Storage type: cookie, localStorage, sessionStorage (storage)\"}},"
     "\"required\":[\"method\"]}}"
     "]}";
@@ -695,6 +697,24 @@ static char *handle_tool_call(const char *name, const char *arguments) {
         free(escaped); free(js);
         char *resp = http_post("/eval", body);
         free(body);
+        return resp ? resp : strdup("{\"error\":\"connection failed\"}");
+    }
+
+    if (strcmp(name, "drag") == 0) {
+        char *from = json_get_string(arguments, "from");
+        char *to = json_get_string(arguments, "to");
+        if (!from || !to) { free(from); free(to); return strdup("{\"error\":\"missing from or to\"}"); }
+        char *esc_from = json_escape(from);
+        char *esc_to = json_escape(to);
+        char body[8192];
+        snprintf(body, sizeof(body), "{\"from\":\"%s\",\"to\":\"%s\"}", esc_from, esc_to);
+        free(esc_from); free(esc_to); free(from); free(to);
+        char *resp = http_post("/drag", body);
+        return resp ? resp : strdup("{\"error\":\"connection failed\"}");
+    }
+
+    if (strcmp(name, "dialog") == 0) {
+        char *resp = http_get("/dialog");
         return resp ? resp : strdup("{\"error\":\"connection failed\"}");
     }
 

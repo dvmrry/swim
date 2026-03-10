@@ -1116,6 +1116,84 @@ static NSDictionary *do_hover(NSDictionary *json, ServeContext *ctx) {
     return result ?: @{@"ok": @NO, @"error": @"hover failed"};
 }
 
+static NSDictionary *do_dialog(ServeContext *ctx) {
+    __block NSDictionary *result = nil;
+    dispatch_sync(dispatch_get_main_queue(), ^{
+        NSMutableArray *queue = (__bridge NSMutableArray *)ui_get_dialog_queue(ctx->ui);
+        NSArray *dialogs = [queue copy];
+        [queue removeAllObjects];
+        result = @{@"ok": @YES, @"dialogs": dialogs, @"count": @(dialogs.count)};
+    });
+    return result ?: @{@"ok": @NO, @"error": @"dialog failed"};
+}
+
+static NSDictionary *do_drag(NSDictionary *json, ServeContext *ctx) {
+    NSString *from = json[@"from"];
+    NSString *to = json[@"to"];
+    if (!from || !to) return @{@"ok": @NO, @"error": @"missing from or to selector"};
+
+    __block NSDictionary *result = nil;
+    dispatch_sync(dispatch_get_main_queue(), ^{
+        WKWebView *wv = (__bridge WKWebView *)ui_get_active_webview(ctx->ui);
+        if (!wv) { result = @{@"ok": @NO, @"error": @"no active webview"}; return; }
+
+        NSString *escapedFrom = [from stringByReplacingOccurrencesOfString:@"'"
+                                                               withString:@"\\'"];
+        NSString *escapedTo = [to stringByReplacingOccurrencesOfString:@"'"
+                                                           withString:@"\\'"];
+
+        NSString *js = [NSString stringWithFormat:
+            @"(function(){"
+            "var src=document.querySelector('%@');"
+            "if(!src)return JSON.stringify({ok:false,error:'source not found'});"
+            "var dst=document.querySelector('%@');"
+            "if(!dst)return JSON.stringify({ok:false,error:'target not found'});"
+            "var sr=src.getBoundingClientRect(),dr=dst.getBoundingClientRect();"
+            "var sx=sr.left+sr.width/2,sy=sr.top+sr.height/2;"
+            "var dx=dr.left+dr.width/2,dy=dr.top+dr.height/2;"
+            "var opts={bubbles:true,cancelable:true};"
+            // Mouse events
+            "src.dispatchEvent(new MouseEvent('mousedown',Object.assign({},opts,{clientX:sx,clientY:sy})));"
+            "src.dispatchEvent(new MouseEvent('mousemove',Object.assign({},opts,{clientX:sx,clientY:sy})));"
+            "dst.dispatchEvent(new MouseEvent('mousemove',Object.assign({},opts,{clientX:dx,clientY:dy})));"
+            "dst.dispatchEvent(new MouseEvent('mouseup',Object.assign({},opts,{clientX:dx,clientY:dy})));"
+            // HTML5 drag events
+            "var dt=new DataTransfer();"
+            "src.dispatchEvent(new DragEvent('dragstart',{bubbles:true,cancelable:true,dataTransfer:dt}));"
+            "src.dispatchEvent(new DragEvent('drag',{bubbles:true,cancelable:true,dataTransfer:dt}));"
+            "dst.dispatchEvent(new DragEvent('dragenter',{bubbles:true,cancelable:true,dataTransfer:dt}));"
+            "dst.dispatchEvent(new DragEvent('dragover',{bubbles:true,cancelable:true,dataTransfer:dt}));"
+            "dst.dispatchEvent(new DragEvent('drop',{bubbles:true,cancelable:true,dataTransfer:dt}));"
+            "src.dispatchEvent(new DragEvent('dragend',{bubbles:true,cancelable:true,dataTransfer:dt}));"
+            "return JSON.stringify({ok:true,from:{x:sx,y:sy},to:{x:dx,y:dy}})"
+            "})()", escapedFrom, escapedTo];
+
+        __block BOOL done = NO;
+        __block NSDictionary *response = nil;
+
+        [wv evaluateJavaScript:js completionHandler:^(id res, NSError *error) {
+            if (error) {
+                response = @{@"ok": @NO, @"error": error.localizedDescription ?: @"unknown"};
+            } else if (res && [res isKindOfClass:[NSString class]]) {
+                NSData *data = [(NSString *)res dataUsingEncoding:NSUTF8StringEncoding];
+                response = [NSJSONSerialization JSONObjectWithData:data options:0 error:nil];
+            }
+            done = YES;
+        }];
+
+        NSDate *timeout = [NSDate dateWithTimeIntervalSinceNow:5.0];
+        while (!done && [[NSRunLoop currentRunLoop] runMode:NSDefaultRunLoopMode
+                                                beforeDate:timeout]) {
+            if ([timeout timeIntervalSinceNow] <= 0) break;
+        }
+
+        if (!done) result = @{@"ok": @NO, @"error": @"drag timeout"};
+        else if (response) result = response;
+        else result = @{@"ok": @NO, @"error": @"drag failed"};
+    });
+    return result ?: @{@"ok": @NO, @"error": @"drag failed"};
+}
+
 static NSDictionary *do_console(ServeContext *ctx) {
     __block NSDictionary *result = nil;
     dispatch_sync(dispatch_get_main_queue(), ^{
@@ -1299,6 +1377,15 @@ static void handle_hover(int fd, HTTPRequest *req, ServeContext *ctx) {
     send_dict(fd, do_hover(json, ctx));
 }
 
+static void handle_drag(int fd, HTTPRequest *req, ServeContext *ctx) {
+    NSDictionary *json = parse_json_body(req->body, req->body_len);
+    send_dict(fd, do_drag(json, ctx));
+}
+
+static void handle_dialog(int fd, ServeContext *ctx) {
+    send_dict(fd, do_dialog(ctx));
+}
+
 static void handle_query(int fd, HTTPRequest *req, ServeContext *ctx) {
     if (!req->body || req->body_len <= 0) {
         send_json(fd, 400, "{\"error\":\"missing body\"}");
@@ -1401,6 +1488,10 @@ static void handle_batch(int fd, HTTPRequest *req, ServeContext *ctx) {
             result = do_click(step, ctx);
         } else if ([type isEqualToString:@"hover"]) {
             result = do_hover(step, ctx);
+        } else if ([type isEqualToString:@"drag"]) {
+            result = do_drag(step, ctx);
+        } else if ([type isEqualToString:@"dialog"]) {
+            result = do_dialog(ctx);
         } else if ([type isEqualToString:@"query"]) {
             result = do_query(step, ctx);
         } else if ([type isEqualToString:@"tab"]) {
@@ -1484,6 +1575,10 @@ static void *server_thread(void *arg) {
             handle_storage(client_fd, &req, ctx);
         } else if (strcmp(req.method, "POST") == 0 && strcmp(req.path, "/hover") == 0) {
             handle_hover(client_fd, &req, ctx);
+        } else if (strcmp(req.method, "POST") == 0 && strcmp(req.path, "/drag") == 0) {
+            handle_drag(client_fd, &req, ctx);
+        } else if (strcmp(req.method, "GET") == 0 && strcmp(req.path, "/dialog") == 0) {
+            handle_dialog(client_fd, ctx);
         } else if (strcmp(req.method, "POST") == 0 && strcmp(req.path, "/batch") == 0) {
             handle_batch(client_fd, &req, ctx);
         } else {
@@ -1519,6 +1614,11 @@ void serve_start(int port, ServeContext *ctx) {
     }
 
     fprintf(stderr, "swim: serving on port %d\n", port);
+
+    // Enable serving mode for dialog auto-response
+    dispatch_async(dispatch_get_main_queue(), ^{
+        ui_set_serving(ctx->ui, true);
+    });
 
     g_server_fd = fd;
     pthread_t tid;

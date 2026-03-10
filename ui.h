@@ -105,4 +105,8 @@ void *ui_get_window(SwimUI *ui);
 bool ui_is_loading(SwimUI *ui);
 void *ui_get_active_webview(SwimUI *ui);
 
+// Dialog queue for serving mode
+void ui_set_serving(SwimUI *ui, bool serving);
+void *ui_get_dialog_queue(SwimUI *ui);  // returns NSMutableArray*
+
 #endif
