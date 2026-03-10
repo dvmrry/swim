@@ -39,6 +39,12 @@ typedef struct Config {
     char proxy_host[256];
     int proxy_port;
 
+    // [ai]
+    char ai_api_key[256];
+    char ai_model[64];       // default model (haiku)
+    char ai_model_plus[64];  // upgrade model (sonnet)
+    char ai_sidebar[16];     // "always", "never", "auto"
+
     // [keys.normal]
     KeyBinding key_bindings[64];
     int key_binding_count;

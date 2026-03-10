@@ -839,12 +839,18 @@ static void on_command_cancel(void *ctx) {
     ui_hide_command_bar(app.ui);
 }
 
+static NSMutableArray *g_sidebar_messages = nil;
+
 static void on_url_changed(const char *url, int tab_id, void *ctx) {
     (void)ctx;
     browser_tab_set_url(&app.browser, tab_id, url);
     Tab *t = browser_active(&app.browser);
     if (t && t->id == tab_id) {
         set_url_with_tls(url);
+    }
+    // Clear sidebar conversation on navigation (ephemeral per page)
+    if (t && t->id == tab_id && g_sidebar_messages) {
+        [g_sidebar_messages removeAllObjects];
     }
     // Record in history (skip private tabs)
     if (url && strncmp(url, "about:", 6) != 0 && !ui_tab_is_private(app.ui, tab_id)) {
@@ -885,6 +891,100 @@ static void on_nav_error(const char *error, int tab_id, void *ctx) {
 static void on_focus_changed(bool focused, void *ctx) {
     (void)ctx;
     app_set_mode(focused ? MODE_INSERT : MODE_NORMAL);
+}
+
+static void on_sidebar_prompt(const char *text, void *ctx) {
+    (void)ctx;
+    if (!app.config.ai_api_key[0]) {
+        ui_sidebar_respond(app.ui,
+            "No API key. Add to ~/.config/swim/config.toml:\n\n"
+            "[ai]\napi_key = \"sk-ant-...\"", true);
+        return;
+    }
+
+    if (!g_sidebar_messages) {
+        g_sidebar_messages = [NSMutableArray new];
+    }
+
+    NSString *prompt = [NSString stringWithUTF8String:text];
+
+    // Gather page context from active tab
+    Tab *active = browser_active(&app.browser);
+    NSString *pageContext = @"No page loaded.";
+    if (active && active->url[0]) {
+        pageContext = [NSString stringWithFormat:
+            @"Current page:\n- URL: %s\n- Title: %s",
+            active->url, active->title];
+    }
+
+    // Build system message with page context
+    NSString *system = [NSString stringWithFormat:
+        @"You are an AI assistant embedded in the swim web browser sidebar. "
+        "You can see what the user sees and help them interact with web pages. "
+        "Keep responses concise — you're a companion, not a lecturer. "
+        "Use markdown formatting.\n\n%@", pageContext];
+
+    // Add user message
+    [g_sidebar_messages addObject:@{@"role": @"user", @"content": prompt}];
+
+    // Build request
+    NSString *model = [NSString stringWithUTF8String:app.config.ai_model];
+    NSDictionary *body = @{
+        @"model": model,
+        @"max_tokens": @1024,
+        @"system": system,
+        @"messages": [g_sidebar_messages copy],
+    };
+
+    NSError *err = nil;
+    NSData *jsonData = [NSJSONSerialization dataWithJSONObject:body options:0 error:&err];
+    if (!jsonData) {
+        ui_sidebar_respond(app.ui, "Failed to build request.", true);
+        return;
+    }
+
+    NSURL *url = [NSURL URLWithString:@"https://api.anthropic.com/v1/messages"];
+    NSMutableURLRequest *req = [NSMutableURLRequest requestWithURL:url];
+    req.HTTPMethod = @"POST";
+    req.HTTPBody = jsonData;
+    [req setValue:@"application/json" forHTTPHeaderField:@"Content-Type"];
+    [req setValue:[NSString stringWithUTF8String:app.config.ai_api_key]
+        forHTTPHeaderField:@"x-api-key"];
+    [req setValue:@"2023-06-01" forHTTPHeaderField:@"anthropic-version"];
+
+    NSURLSession *session = [NSURLSession sharedSession];
+    [[session dataTaskWithRequest:req completionHandler:^(NSData *data, NSURLResponse *response, NSError *error) {
+        dispatch_async(dispatch_get_main_queue(), ^{
+            if (error) {
+                ui_sidebar_respond(app.ui,
+                    [[NSString stringWithFormat:@"Error: %@", error.localizedDescription] UTF8String], true);
+                return;
+            }
+
+            NSHTTPURLResponse *httpResp = (NSHTTPURLResponse *)response;
+            if (httpResp.statusCode != 200) {
+                NSDictionary *errBody = [NSJSONSerialization JSONObjectWithData:data options:0 error:nil];
+                NSString *errMsg = errBody[@"error"][@"message"] ?: @"Unknown API error";
+                ui_sidebar_respond(app.ui,
+                    [[NSString stringWithFormat:@"API error (%ld): %@",
+                        (long)httpResp.statusCode, errMsg] UTF8String], true);
+                return;
+            }
+
+            NSDictionary *result = [NSJSONSerialization JSONObjectWithData:data options:0 error:nil];
+            NSArray *content = result[@"content"];
+            if (content.count > 0) {
+                NSString *text = content[0][@"text"];
+                if (text) {
+                    // Add assistant response to conversation history
+                    [g_sidebar_messages addObject:@{@"role": @"assistant", @"content": text}];
+                    ui_sidebar_respond(app.ui, [text UTF8String], false);
+                    return;
+                }
+            }
+            ui_sidebar_respond(app.ui, "Empty response from API.", true);
+        });
+    }] resume];
 }
 
 static void on_hints_done(void *ctx) {
@@ -1088,6 +1188,7 @@ int main(int argc, const char *argv[]) {
             .on_hints_done = on_hints_done,
             .on_tab_selected = on_tab_selected,
             .on_command_complete = on_command_complete,
+            .on_sidebar_prompt = on_sidebar_prompt,
             .ctx = &app,
         };
         app.ui = ui_create(callbacks, app.config.compact_titlebar, app.config.tab_bar, app.config.status_bar, &app.theme);

@@ -71,7 +71,7 @@ static const char *mode_name(Mode mode) {
 @end
 
 // Forward declarations for sidebar (struct defined later)
-static void ui_sidebar_respond(SwimUI *ui, const char *text, bool is_system);
+void ui_sidebar_respond(SwimUI *ui, const char *text, bool is_system);
 
 @implementation SwimScriptHandler
 - (void)userContentController:(WKUserContentController *)ctrl
@@ -106,9 +106,11 @@ static void ui_sidebar_respond(SwimUI *ui, const char *text, bool is_system);
             self.callbacks.on_hints_done(self.callbacks.ctx);
         }
     } else if ([type isEqualToString:@"sidebar-prompt"]) {
-        if (self.ui) {
-            // For now, show placeholder — will route through MCP
-            ui_sidebar_respond(self.ui, "AI companion not yet connected. This is a UI preview.", true);
+        NSString *text = body[@"text"];
+        if (text && self.callbacks.on_sidebar_prompt) {
+            self.callbacks.on_sidebar_prompt([text UTF8String], self.callbacks.ctx);
+        } else if (text && self.ui) {
+            ui_sidebar_respond(self.ui, "No API key configured. Add ai.api_key to config.", true);
         }
     } else if ([type isEqualToString:@"sidebar-escape"]) {
         if (self.ui) {
@@ -262,7 +264,7 @@ static int parse_bar_mode(const char *mode) {
     return 0;
 }
 
-static void ui_sidebar_respond(SwimUI *ui, const char *text, bool is_system) {
+void ui_sidebar_respond(SwimUI *ui, const char *text, bool is_system) {
     NSString *escaped = [[NSString stringWithUTF8String:text]
         stringByReplacingOccurrencesOfString:@"\\" withString:@"\\\\"];
     escaped = [escaped stringByReplacingOccurrencesOfString:@"'" withString:@"\\'"];
@@ -1876,10 +1878,12 @@ void ui_sidebar_submit(SwimUI *ui, const char *prompt) {
         stringByReplacingOccurrencesOfString:@"\\" withString:@"\\\\"];
     escaped = [escaped stringByReplacingOccurrencesOfString:@"'" withString:@"\\'"];
     escaped = [escaped stringByReplacingOccurrencesOfString:@"\n" withString:@"\\n"];
+    // Directly call JS functions instead of simulating keypress
     NSString *js = [NSString stringWithFormat:
-        @"input.value = '%@';"
-        "input.dispatchEvent(new Event('input'));"
-        "var e = new KeyboardEvent('keydown', {key:'Enter'});"
-        "input.dispatchEvent(e);", escaped];
+        @"addMessage('user', '%@');"
+        "showThinking();"
+        "window.webkit.messageHandlers.swim.postMessage("
+        "  {type:'sidebar-prompt', text:'%@'}"
+        ");", escaped, escaped];
     [ui->sidebarWebview evaluateJavaScript:js completionHandler:nil];
 }

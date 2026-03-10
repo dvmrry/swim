@@ -20,6 +20,7 @@ typedef struct UICallbacks {
     void (*on_hints_done)(void *ctx);
     void (*on_tab_selected)(int index, void *ctx);
     const char *(*on_command_complete)(const char *prefix, const char *cmd_prefix, void *ctx);
+    void (*on_sidebar_prompt)(const char *text, void *ctx);
     void *ctx;
 } UICallbacks;
 
@@ -115,5 +116,6 @@ void ui_hide_sidebar(SwimUI *ui);
 void ui_toggle_sidebar(SwimUI *ui);
 bool ui_sidebar_visible(SwimUI *ui);
 void ui_sidebar_submit(SwimUI *ui, const char *prompt);
+void ui_sidebar_respond(SwimUI *ui, const char *text, bool is_system);
 
 #endif

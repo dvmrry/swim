@@ -25,6 +25,9 @@ void config_init(Config *c) {
     c->compact_titlebar = false;
     c->adblock_enabled = true;
     snprintf(c->proxy_type, sizeof(c->proxy_type), "none");
+    snprintf(c->ai_model, sizeof(c->ai_model), "claude-haiku-4-5-20251001");
+    snprintf(c->ai_model_plus, sizeof(c->ai_model_plus), "claude-sonnet-4-6");
+    snprintf(c->ai_sidebar, sizeof(c->ai_sidebar), "auto");
 
     // Default search shortcuts
     add_search_shortcut(c, "g", "https://www.google.com/search?q=%s");
@@ -190,6 +193,18 @@ bool config_set(Config *c, const char *key, const char *value) {
         snprintf(c->proxy_host, sizeof(c->proxy_host), "%s", value);
     } else if (strcmp(key, "proxy.port") == 0 || strcmp(key, "proxy_port") == 0) {
         c->proxy_port = atoi(value);
+    } else if (strcmp(key, "ai.api_key") == 0 || strcmp(key, "ai_api_key") == 0) {
+        snprintf(c->ai_api_key, sizeof(c->ai_api_key), "%s", value);
+    } else if (strcmp(key, "ai.model") == 0 || strcmp(key, "ai_model") == 0) {
+        snprintf(c->ai_model, sizeof(c->ai_model), "%s", value);
+    } else if (strcmp(key, "ai.model_plus") == 0 || strcmp(key, "ai_model_plus") == 0) {
+        snprintf(c->ai_model_plus, sizeof(c->ai_model_plus), "%s", value);
+    } else if (strcmp(key, "ai.sidebar") == 0 || strcmp(key, "ai_sidebar") == 0) {
+        if (strcmp(value, "always") == 0 || strcmp(value, "never") == 0 || strcmp(value, "auto") == 0) {
+            snprintf(c->ai_sidebar, sizeof(c->ai_sidebar), "%s", value);
+        } else {
+            return false;
+        }
     } else if (strncmp(key, "keys.normal.", 12) == 0) {
         if (c->key_binding_count < 64) {
             KeyBinding *kb = &c->key_bindings[c->key_binding_count++];
@@ -235,6 +250,14 @@ void config_save(Config *c, const char *filepath) {
         fprintf(f, "type = \"%s\"\n", c->proxy_type);
         fprintf(f, "host = \"%s\"\n", c->proxy_host);
         fprintf(f, "port = %d\n", c->proxy_port);
+    }
+
+    if (c->ai_api_key[0]) {
+        fprintf(f, "\n[ai]\n");
+        fprintf(f, "api_key = \"%s\"\n", c->ai_api_key);
+        fprintf(f, "model = \"%s\"\n", c->ai_model);
+        fprintf(f, "model_plus = \"%s\"\n", c->ai_model_plus);
+        fprintf(f, "sidebar = \"%s\"\n", c->ai_sidebar);
     }
 
     if (c->key_binding_count > 0) {
