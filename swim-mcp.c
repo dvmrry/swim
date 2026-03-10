@@ -301,6 +301,7 @@ static const char *kToolsList =
     "\"selector\":{\"type\":\"string\"},\"value\":{\"type\":\"string\"}}}},"
     "\"timeout\":{\"type\":\"integer\",\"description\":\"Timeout in ms (wait_for, default 10000)\"},"
     "\"url_contains\":{\"type\":\"string\",\"description\":\"URL substring to wait for (wait_for)\"},"
+    "\"idle\":{\"type\":\"boolean\",\"description\":\"Wait for page idle - readyState complete + no DOM changes for 500ms (wait_for)\"},"
     "\"attribute\":{\"type\":\"string\",\"description\":\"Attribute name to read (query)\"},"
     "\"all\":{\"type\":\"boolean\",\"description\":\"Query all matching elements (query)\"},"
     "\"index\":{\"type\":\"integer\",\"description\":\"Tab index to switch to (tab)\"},"
@@ -366,7 +367,26 @@ static char *handle_tool_call(const char *name, const char *arguments) {
         free(url);
         char *resp = http_post("/command", body);
         free(body);
-        return resp ? resp : strdup("{\"error\":\"connection failed\"}");
+        if (!resp) return strdup("{\"error\":\"connection failed\"}");
+        free(resp);
+        // Wait for page to load (title becomes non-empty or 5s timeout)
+        for (int i = 0; i < 50; i++) {
+            usleep(100000); // 100ms
+            char *state = http_get("/state");
+            if (!state) continue;
+            // Check if title is non-empty: look for "title":"X" where X is not empty
+            char *tp = strstr(state, "\"title\":\"");
+            if (tp) {
+                tp += 9;
+                if (*tp != '"') { // title is non-empty
+                    return state;
+                }
+            }
+            free(state);
+        }
+        // Timeout — return current state anyway
+        char *state = http_get("/state");
+        return state ? state : strdup("{\"ok\":true}");
     }
 
     if (strcmp(name, "navigate_back") == 0) {
@@ -465,12 +485,20 @@ static char *handle_tool_call(const char *name, const char *arguments) {
     if (strcmp(name, "wait_for") == 0) {
         char *selector = json_get_string(arguments, "selector");
         char *url_contains = json_get_string(arguments, "url_contains");
-        if (!selector && !url_contains)
-            return strdup("{\"error\":\"missing selector or url_contains\"}");
+        bool idle = strstr(arguments, "\"idle\":true") != NULL;
+        if (!selector && !url_contains && !idle)
+            return strdup("{\"error\":\"missing selector, url_contains, or idle\"}");
         int timeout = 0;
         bool has_timeout = json_get_int(arguments, "timeout", &timeout);
         char *body;
-        if (selector) {
+        if (idle) {
+            if (has_timeout && timeout > 0) {
+                body = malloc(64);
+                snprintf(body, 64, "{\"idle\":true,\"timeout\":%d}", timeout);
+            } else {
+                body = strdup("{\"idle\":true}");
+            }
+        } else if (selector) {
             char *escaped = json_escape(selector);
             int bsize = (int)strlen(escaped) + 128;
             body = malloc(bsize);
