@@ -946,6 +946,58 @@ static NSDictionary *do_console(ServeContext *ctx) {
     return eval_js_sync(ctx, js, @"console", 5.0, false);
 }
 
+static NSDictionary *do_requests(ServeContext *ctx) {
+    NSString *js =
+        @"(function(){"
+        "if(!window.__swim_req){"
+        "  window.__swim_req=[];"
+        "  var origFetch=window.fetch;"
+        "  window.fetch=function(){"
+        "    var url=arguments[0],opts=arguments[1]||{};"
+        "    if(typeof url==='object')url=url.url||String(url);"
+        "    var method=(opts.method||'GET').toUpperCase();"
+        "    var entry={method:method,url:String(url),ts:Date.now(),type:'fetch'};"
+        "    var idx=window.__swim_req.length;"
+        "    window.__swim_req.push(entry);"
+        "    if(window.__swim_req.length>500)window.__swim_req.shift();"
+        "    return origFetch.apply(this,arguments).then(function(r){"
+        "      window.__swim_req[idx>=window.__swim_req.length?window.__swim_req.length-1:idx].status=r.status;"
+        "      return r"
+        "    },function(e){"
+        "      window.__swim_req[idx>=window.__swim_req.length?window.__swim_req.length-1:idx].error=e.message;"
+        "      throw e"
+        "    })"
+        "  };"
+        "  var origOpen=XMLHttpRequest.prototype.open;"
+        "  var origSend=XMLHttpRequest.prototype.send;"
+        "  XMLHttpRequest.prototype.open=function(method,url){"
+        "    this.__swim={method:method.toUpperCase(),url:String(url)};"
+        "    return origOpen.apply(this,arguments)"
+        "  };"
+        "  XMLHttpRequest.prototype.send=function(){"
+        "    if(this.__swim){"
+        "      var entry={method:this.__swim.method,url:this.__swim.url,ts:Date.now(),type:'xhr'};"
+        "      var idx=window.__swim_req.length;"
+        "      window.__swim_req.push(entry);"
+        "      if(window.__swim_req.length>500)window.__swim_req.shift();"
+        "      var self=this;"
+        "      this.addEventListener('load',function(){"
+        "        window.__swim_req[idx>=window.__swim_req.length?window.__swim_req.length-1:idx].status=self.status"
+        "      });"
+        "      this.addEventListener('error',function(){"
+        "        window.__swim_req[idx>=window.__swim_req.length?window.__swim_req.length-1:idx].error='network error'"
+        "      })"
+        "    }"
+        "    return origSend.apply(this,arguments)"
+        "  }"
+        "}"
+        "var reqs=window.__swim_req.splice(0);"
+        "return JSON.stringify({ok:true,requests:reqs,count:reqs.length})"
+        "})()";
+
+    return eval_js_sync(ctx, js, @"requests", 5.0, false);
+}
+
 static NSDictionary *do_sleep_step(NSDictionary *json) {
     NSNumber *ms = json[@"ms"];
     double seconds = ms ? [ms doubleValue] / 1000.0 : 0.1;
@@ -1080,6 +1132,10 @@ static void handle_dialog(int fd, ServeContext *ctx) {
     send_dict(fd, do_dialog(ctx));
 }
 
+static void handle_requests(int fd, ServeContext *ctx) {
+    send_dict(fd, do_requests(ctx));
+}
+
 static void handle_query(int fd, HTTPRequest *req, ServeContext *ctx) {
     NSDictionary *json = parse_json_body(req->body, req->body_len);
     send_dict(fd, do_query(json, ctx));
@@ -1161,6 +1217,8 @@ static void handle_batch(int fd, HTTPRequest *req, ServeContext *ctx) {
             result = do_drag(step, ctx);
         } else if ([type isEqualToString:@"dialog"]) {
             result = do_dialog(ctx);
+        } else if ([type isEqualToString:@"requests"]) {
+            result = do_requests(ctx);
         } else if ([type isEqualToString:@"query"]) {
             result = do_query(step, ctx);
         } else if ([type isEqualToString:@"tab"]) {
@@ -1208,6 +1266,7 @@ static const Route routes[] = {
     {"GET",  "/interact",   {.get  = handle_interact}},
     {"GET",  "/console",    {.get  = handle_console}},
     {"GET",  "/dialog",     {.get  = handle_dialog}},
+    {"GET",  "/requests",   {.get  = handle_requests}},
     {"POST", "/action",     {.post = handle_action}},
     {"POST", "/command",    {.post = handle_command}},
     {"POST", "/key",        {.post = handle_key}},

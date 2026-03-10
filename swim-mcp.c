@@ -276,14 +276,14 @@ static const char *kToolsList =
     "\"description\":\"Control the swim browser. Methods: navigate (url), screenshot, pdf, extract, "
     "navigate_back, navigate_forward, eval (js), "
     "interact, fill (selector+value or fields[]), wait_for (selector|url_contains, timeout?), "
-    "console, dialog, query (selector, attribute?, all?), tab (index), select (selector, text|value), "
+    "console, dialog, requests (network log), query (selector, attribute?, all?), tab (index), select (selector, text|value), "
     "scroll (selector), storage (type, action?, key?, value?), drag (from, to), "
     "execute (command), action (action, count?), state, click (selector|text), hover (selector), key (key)\","
     "\"inputSchema\":{\"type\":\"object\","
     "\"properties\":{"
     "\"method\":{\"type\":\"string\",\"enum\":[\"navigate\",\"navigate_back\",\"navigate_forward\","
     "\"screenshot\",\"pdf\",\"extract\","
-    "\"interact\",\"fill\",\"wait_for\",\"console\",\"dialog\",\"query\",\"tab\",\"select\","
+    "\"interact\",\"fill\",\"wait_for\",\"console\",\"dialog\",\"requests\",\"query\",\"tab\",\"select\","
     "\"scroll\",\"storage\",\"drag\","
     "\"execute\",\"action\",\"state\",\"click\",\"hover\",\"key\",\"eval\"],"
     "\"description\":\"The operation to perform\"},"
@@ -701,6 +701,7 @@ static char *handle_tool_call(const char *name, const char *arguments) {
     }
 
     if (strcmp(name, "dialog") == 0) return get_passthrough("/dialog");
+    if (strcmp(name, "requests") == 0) return get_passthrough("/requests");
 
     return strdup("{\"error\":\"unknown tool\"}");
 }
