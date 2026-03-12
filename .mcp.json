@@ -1,7 +1,7 @@
 {
   "mcpServers": {
     "swim": {
-      "command": "/Users/dm/src/gh/dvmrry/swim/swim-mcp",
+      "command": "./swim-mcp",
       "args": [],
       "autoApprove": ["swim"]
     }

@@ -47,9 +47,3 @@ Notes:
 - `requests` captures fetch/XHR calls (method, URL, status, timing) — first call installs hooks, subsequent calls drain the buffer
 - `upload` sets file input programmatically via DataTransfer API — takes selector, base64 data, filename, mime_type
 - `sidebar` bridges the AI sidebar: call with no args to long-poll for user prompts (30s), call with `text` to post a response
-
-## Conventions
-
-- No Co-Authored-By lines in commits
-- Keep it minimalist — no unnecessary features or abstractions
-- Test infrastructure uses `#ifdef SWIM_TEST` to compile out of release builds

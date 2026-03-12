@@ -5,8 +5,8 @@ swim.app/
 *.dSYM/
 .DS_Store
 result
-extract_js.inc
-interact_js.inc
+*.inc
 test-screenshots/
 test-ui.sh
 Screenshot*.png
+docs/plans/
